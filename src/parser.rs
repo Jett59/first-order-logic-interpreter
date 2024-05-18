@@ -1,3 +1,5 @@
+use std::iter::Peekable;
+
 use crate::{BinaryOperator, Expression, Quantifier};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,7 +13,6 @@ enum Token {
     CloseBrace,
     Comma,
     Identifier(String),
-    End,
 }
 
 struct Tokenizer {
@@ -66,6 +67,14 @@ impl Iterator for Tokenizer {
                 self.remaining_text = self.remaining_text[2..].to_string();
                 Some(Token::BinaryOperator(BinaryOperator::Or))
             }
+            '<' if self.remaining_text.starts_with("<->") => {
+                self.remaining_text = self.remaining_text[3..].to_string();
+                Some(Token::BinaryOperator(BinaryOperator::EquivalentTo))
+            }
+            '-' if self.remaining_text.starts_with("->") => {
+                self.remaining_text = self.remaining_text[2..].to_string();
+                Some(Token::BinaryOperator(BinaryOperator::Implies))
+            }
             '!' | '~' => {
                 self.remaining_text = self.remaining_text[1..].to_string();
                 Some(Token::Negation)
@@ -110,270 +119,243 @@ impl Iterator for Tokenizer {
     }
 }
 
-trait ParserTrait {
-    /// Returns the next parser to use and whether the current token should be passed in again.
-    ///
-    /// In general, the token should be passed again if a new parser was created and the token
-    /// is important for whatever the new parser is parsing.
-    fn receive_token(self: Box<Self>, token: Token) -> (Box<dyn ParserTrait>, bool);
-    fn receive_subexpression(self: Box<Self>, subexpression: Expression) -> Box<dyn ParserTrait>;
-
-    fn expression(&self) -> Option<Expression> {
-        None
-    }
-}
-
-pub struct Parser {
-    state: Option<Box<dyn ParserTrait>>,
-}
+pub struct Parser {}
 
 impl Parser {
-    pub fn new() -> Parser {
-        Parser {
-            state: Some(Box::new(ExpressionParser::default())),
-        }
+    pub fn new() -> Self {
+        Self {}
     }
 
     pub fn parse(&self, text: String) -> Expression {
-        let mut parser: Box<dyn ParserTrait> = Box::new(ExpressionParser::default());
-        for token in Tokenizer::new(text) {
-            let mut receiving_this_token = true;
-            while receiving_this_token {
-                let (new_parser, keep_receiving_token) = parser.receive_token(token.clone());
-                parser = new_parser;
-                receiving_this_token = keep_receiving_token;
-            }
-        }
-        let mut keep_receiving_end = true;
-        while keep_receiving_end {
-            let (new_parser, keep_receiving_token) = parser.receive_token(Token::End);
-            parser = new_parser;
-            keep_receiving_end = keep_receiving_token;
-        }
-        parser.expression().expect("Unexpected end of input")
+        let mut tokenizer = Tokenizer::new(text).peekable();
+        self.parse_expression(&mut tokenizer, None)
     }
-}
 
-#[derive(Default)]
-struct ExpressionParser {
-    previous_parser: Option<Box<dyn ParserTrait>>,
-    expression: Option<Expression>,
-}
-
-impl ExpressionParser {
-    fn new(previous: Box<dyn ParserTrait>) -> ExpressionParser {
-        ExpressionParser {
-            previous_parser: Some(previous),
-            expression: None,
+    fn parse_expression(
+        &self,
+        tokenizer: &mut Peekable<Tokenizer>,
+        close: Option<Token>,
+    ) -> Expression {
+        // Expressions are strings of 'atomic' expressions separated with binary operators.
+        // First, we just parse all of the atomic expressions. Then we go through and sort out the binary operators, taking care to respect operator precedence.
+        enum ExpressionPart {
+            Atomic(Expression),
+            BinaryOperator(BinaryOperator),
         }
-    }
-}
-
-impl ParserTrait for ExpressionParser {
-    fn receive_token(self: Box<Self>, token: Token) -> (Box<dyn ParserTrait>, bool) {
-        match token {
-            Token::Quantifier(_) => (Box::new(QuantifierParser::new(self)), true),
-            Token::Negation => (Box::new(NegationParser::new(self)), true),
-            Token::OpenParen => (Box::new(ExpressionParser::new(self)), false),
-            Token::Identifier(_) => (Box::new(PredicateParser::new(self)), true),
-            Token::CloseParen | Token::CloseBrace | Token::End => {
-                if let Some(previous_parser) = self.previous_parser {
-                    (
-                        previous_parser.receive_subexpression(self.expression.unwrap()),
-                        token == Token::End, // Keep receiving the 'end' token.
-                    )
-                } else {
-                    // We are the root parser, so terminate the chain here.
-                    (self, false)
+        let mut parts = Vec::new();
+        loop {
+            match tokenizer.peek() {
+                token if token == close.as_ref() => {
+                    break;
+                }
+                Some(Token::BinaryOperator(binary_operator)) => {
+                    match parts.last() {
+                        Some(ExpressionPart::Atomic(_)) => {}
+                        _ => panic!("Expected atomic expression, got {:?}", binary_operator),
+                    }
+                    parts.push(ExpressionPart::BinaryOperator(*binary_operator));
+                    tokenizer.next();
+                }
+                Some(Token::OpenParen) => {
+                    tokenizer.next();
+                    let expression = self.parse_expression(tokenizer, Some(Token::CloseParen));
+                    parts.push(ExpressionPart::Atomic(expression));
+                    assert_eq!(tokenizer.next(), Some(Token::CloseParen), "Expected ')'");
+                }
+                _ => {
+                    match parts.last() {
+                        Some(ExpressionPart::Atomic(_)) => {
+                            panic!("Expected binary operator, got {:?}", tokenizer.peek())
+                        }
+                        _ => {}
+                    }
+                    let atomic_expression = self.parse_atomic_expression(tokenizer);
+                    parts.push(ExpressionPart::Atomic(atomic_expression));
                 }
             }
-            _ => panic!("Unexpected token: {:?}", token),
         }
-    }
-
-    fn receive_subexpression(
-        mut self: Box<Self>,
-        subexpression: Expression,
-    ) -> Box<dyn ParserTrait> {
-        self.expression = Some(subexpression);
-        self
-    }
-
-    fn expression(&self) -> Option<Expression> {
-        Some(self.expression.clone().unwrap())
-    }
-}
-
-struct QuantifierParser {
-    previous_parser: Box<dyn ParserTrait>,
-    next_quantifier: Option<Quantifier>,
-    quantifiers: Vec<(Quantifier, String)>,
-}
-
-impl QuantifierParser {
-    fn new(previous: Box<dyn ParserTrait>) -> QuantifierParser {
-        QuantifierParser {
-            previous_parser: previous,
-            next_quantifier: None,
-            quantifiers: Vec::new(),
-        }
-    }
-}
-
-impl ParserTrait for QuantifierParser {
-    fn receive_token(mut self: Box<Self>, token: Token) -> (Box<dyn ParserTrait>, bool) {
-        match token {
-            Token::Quantifier(quantifier) => {
-                assert!(
-                    self.next_quantifier.is_none(),
-                    "Unexpected token: {:?} (expecting identifier)",
-                    token
-                );
-                self.next_quantifier = Some(quantifier);
-                (self, false)
-            }
-            Token::Identifier(ref identifier) => {
-                assert!(
-                    self.next_quantifier.is_some(),
-                    "Unexpected token: {:?} (expecting quantifier or `{{`)",
-                    token
-                );
-                self.quantifiers
-                    .push((self.next_quantifier.unwrap(), identifier.clone()));
-                self.next_quantifier = None;
-                (self, false)
-            }
-            Token::OpenBrace => (Box::new(ExpressionParser::new(self)), false),
-            _ => panic!("Unexpected token: {:?}", token),
-        }
-    }
-
-    fn receive_subexpression(
-        mut self: Box<Self>,
-        subexpression: Expression,
-    ) -> Box<dyn ParserTrait> {
-        let expression = Expression::QuantifierChain(self.quantifiers, Box::new(subexpression));
-        self.previous_parser.receive_subexpression(expression)
-    }
-}
-
-struct NegationParser {
-    previous_parser: Box<dyn ParserTrait>,
-    found_negation: bool,
-}
-
-impl NegationParser {
-    fn new(previous: Box<dyn ParserTrait>) -> NegationParser {
-        NegationParser {
-            previous_parser: previous,
-            found_negation: false,
-        }
-    }
-}
-
-impl ParserTrait for NegationParser {
-    fn receive_token(mut self: Box<Self>, token: Token) -> (Box<dyn ParserTrait>, bool) {
-        match self.found_negation {
-            false => {
-                assert_eq!(
-                    token,
-                    Token::Negation,
-                    "Unexpected token: {:?} (expecting `!`)",
-                    token
-                );
-                self.found_negation = true;
-                (self, false)
-            }
-            true => (Box::new(ExpressionParser::new(self)), true),
-        }
-    }
-
-    fn receive_subexpression(self: Box<Self>, subexpression: Expression) -> Box<dyn ParserTrait> {
-        let expression = Expression::Negation(Box::new(subexpression));
-        self.previous_parser.receive_subexpression(expression)
-    }
-}
-
-struct PredicateParser {
-    previous_parser: Box<dyn ParserTrait>,
-    first_identifier: Option<String>,
-    is_function_call_like: Option<bool>,
-    predicate_name: Option<String>,
-    arguments: Vec<String>,
-}
-
-impl PredicateParser {
-    fn new(previous: Box<dyn ParserTrait>) -> PredicateParser {
-        PredicateParser {
-            previous_parser: previous,
-            first_identifier: None,
-            is_function_call_like: None,
-            predicate_name: None,
-            arguments: Vec::new(),
-        }
-    }
-}
-
-impl ParserTrait for PredicateParser {
-    fn receive_token(mut self: Box<Self>, token: Token) -> (Box<dyn ParserTrait>, bool) {
-        match token {
-            Token::Identifier(identifier) => match self.first_identifier {
-                None => {
-                    self.first_identifier = Some(identifier);
-                    (self, false)
+        // Operator precedence: Implies/EquivalentTo > And > Or
+        // First we handle implies and equivalent to.
+        let mut i = 0;
+        while i < parts.len() {
+            match parts[i] {
+                ExpressionPart::BinaryOperator(binary_operator)
+                    if binary_operator == BinaryOperator::Implies
+                        || binary_operator == BinaryOperator::EquivalentTo =>
+                {
+                    let left = match parts.get(i - 1) {
+                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
+                        _ => unreachable!(),
+                    };
+                    let right = match parts.get(i + 1) {
+                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
+                        _ => unreachable!(),
+                    };
+                    parts.drain(i - 1..=i + 1);
+                    parts.insert(
+                        i - 1,
+                        ExpressionPart::Atomic(Expression::BinaryOperator(
+                            binary_operator,
+                            Box::new(left),
+                            Box::new(right),
+                        )),
+                    );
                 }
-                Some(ref first_token) if self.is_function_call_like != Some(true) => {
-                    // These are predicates of the form `a R b` where `R` is a user-defined binary operator.
-                    if self.predicate_name.is_none() {
-                        self.predicate_name = Some(identifier);
-                        self.arguments.push(first_token.clone());
-                        self.is_function_call_like = Some(false);
-                        (self, false)
-                    } else {
-                        self.arguments.push(identifier);
-                        (
-                            self.previous_parser
-                                .receive_subexpression(Expression::Predicate(
-                                    self.predicate_name.unwrap(),
-                                    self.arguments,
-                                )),
-                            false,
-                        )
+                _ => i += 1,
+            }
+        }
+        // Next we handle and.
+        let mut i = 0;
+        while i < parts.len() {
+            match parts[i] {
+                ExpressionPart::BinaryOperator(BinaryOperator::And) => {
+                    let left = match parts.get(i - 1) {
+                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
+                        _ => unreachable!(),
+                    };
+                    let right = match parts.get(i + 1) {
+                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
+                        _ => unreachable!(),
+                    };
+                    parts.drain(i - 1..=i + 1);
+                    parts.insert(
+                        i - 1,
+                        ExpressionPart::Atomic(Expression::BinaryOperator(
+                            BinaryOperator::And,
+                            Box::new(left),
+                            Box::new(right),
+                        )),
+                    );
+                }
+                _ => i += 1,
+            }
+        }
+        // Finally we handle or.
+        let mut i = 0;
+        while i < parts.len() {
+            match parts[i] {
+                ExpressionPart::BinaryOperator(BinaryOperator::Or) => {
+                    let left = match parts.get(i - 1) {
+                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
+                        _ => unreachable!(),
+                    };
+                    let right = match parts.get(i + 1) {
+                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
+                        _ => unreachable!(),
+                    };
+                    parts.drain(i - 1..=i + 1);
+                    parts.insert(
+                        i - 1,
+                        ExpressionPart::Atomic(Expression::BinaryOperator(
+                            BinaryOperator::Or,
+                            Box::new(left),
+                            Box::new(right),
+                        )),
+                    );
+                }
+                _ => i += 1,
+            }
+        }
+        match parts.get(0) {
+            Some(ExpressionPart::Atomic(expression)) => expression.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn parse_atomic_expression(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
+        // Atomic expressions are quantifier chains, negations and predicates.
+        match tokenizer.peek() {
+            Some(Token::Quantifier(_)) => self.parse_quantifier_chain(tokenizer),
+            Some(Token::Negation) => {
+                tokenizer.next();
+                let expression = self.parse_atomic_expression(tokenizer);
+                Expression::Negation(Box::new(expression))
+            }
+            Some(Token::Identifier(_)) => self.parse_predicate(tokenizer),
+            _ => panic!("Unexpected token: {:?}", tokenizer.peek()),
+        }
+    }
+
+    fn parse_quantifier_chain(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
+        // Quantifier chains are some number of `for all` or `there exists` quantifiers followed by an expression in braces.
+        let mut quantifiers = Vec::new();
+        loop {
+            match tokenizer.next() {
+                Some(Token::Quantifier(quantifier)) => {
+                    match tokenizer.peek() {
+                        Some(Token::Identifier(identifier)) => {
+                            quantifiers.push((quantifier.clone(), identifier.clone()));
+                        }
+                        _ => panic!("Expected identifier, got {:?}", tokenizer.peek()),
+                    }
+                    tokenizer.next();
+                }
+                Some(Token::OpenBrace) => {
+                    break;
+                }
+                _ => panic!(
+                    "Expected quantifier or open brace, got {:?}",
+                    tokenizer.peek()
+                ),
+            }
+        }
+        assert!(!quantifiers.is_empty(), "Expected at least one quantifier");
+        let expression = self.parse_expression(tokenizer, Some(Token::CloseBrace));
+        assert_eq!(tokenizer.next(), Some(Token::CloseBrace), "Expected '}}'");
+        Expression::QuantifierChain(quantifiers, Box::new(expression))
+    }
+
+    fn parse_predicate(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
+        // There are three forms of predicate: named predicates, function-like predicates and infix predicates.
+        // They all start with an identifier.
+        let first_identifier = match tokenizer.next() {
+            Some(Token::Identifier(identifier)) => identifier,
+            _ => panic!("Expected identifier, got {:?}", tokenizer.peek()),
+        };
+        // function-like predicates now have a '('. infix predicates have another identifier. Anything else is a named predicate.
+        match tokenizer.peek().cloned() {
+            Some(Token::OpenParen) => {
+                tokenizer.next();
+                let mut arguments = Vec::new();
+                loop {
+                    match tokenizer.peek() {
+                        Some(Token::CloseParen) => {
+                            break;
+                        }
+                        Some(Token::Identifier(argument)) => {
+                            arguments.push(argument.clone());
+                            tokenizer.next();
+                            match tokenizer.peek() {
+                                Some(Token::Comma) => {
+                                    tokenizer.next();
+                                }
+                                Some(Token::CloseParen) => {}
+                                _ => {
+                                    panic!("Expected ',' or ')', got {:?}", tokenizer.peek());
+                                }
+                            }
+                        }
+                        _ => {
+                            panic!("Expected identifier or ')', got {:?}", tokenizer.peek());
+                        }
                     }
                 }
-                Some(_) => {
-                    self.arguments.push(identifier);
-                    (self, false)
-                }
-            },
-            Token::OpenParen => {
-                assert!(
-                    self.first_identifier.is_some(),
-                    "Unexpected token: {:?} (expecting identifier or `(`)",
-                    token
-                );
-                self.is_function_call_like = Some(true);
-                self.predicate_name = self.first_identifier.clone();
-                (self, false)
+                assert_eq!(tokenizer.next(), Some(Token::CloseParen), "Expected ')'");
+                Expression::Predicate(first_identifier, arguments)
             }
-            Token::CloseParen => {
-                assert!(
-                    self.is_function_call_like.is_some(),
-                    "Unexpected token: {:?} (expecting identifier)",
-                    token
-                );
-                let expression =
-                    Expression::Predicate(self.first_identifier.unwrap(), self.arguments);
-                (
-                    self.previous_parser.receive_subexpression(expression),
-                    false,
+            Some(Token::Identifier(second_identifier)) => {
+                tokenizer.next();
+                // The second identifier is the name of the predicate. The third one is the second argument (all infix predicates are binary).
+                let third_identifier = match tokenizer.next() {
+                    Some(Token::Identifier(identifier)) => identifier,
+                    _ => panic!("Expected identifier, got {:?}", tokenizer.peek()),
+                };
+                Expression::Predicate(
+                    second_identifier.clone(),
+                    vec![first_identifier, third_identifier],
                 )
             }
-            _ => panic!("Unexpected token: {:?}", token),
+            _ => Expression::Predicate(first_identifier, Vec::new()),
         }
-    }
-
-    fn receive_subexpression(self: Box<Self>, _subexpression: Expression) -> Box<dyn ParserTrait> {
-        unreachable!()
     }
 }

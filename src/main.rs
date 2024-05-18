@@ -22,7 +22,6 @@ enum Expression {
     BinaryOperator(BinaryOperator, Box<Expression>, Box<Expression>),
     Predicate(String, Vec<String>),
     Negation(Box<Expression>),
-    Literal(bool),
 }
 
 mod parser;
