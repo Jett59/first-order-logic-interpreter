@@ -12,6 +12,7 @@ enum Token {
     OpenBrace,
     CloseBrace,
     Comma,
+    PredicateStart,
     PredicateIdentifier(String),
     FunctionIdentifier(String),
     ObjectIdentifier(String),
@@ -101,6 +102,10 @@ impl Iterator for Tokenizer {
                 self.remaining_text = self.remaining_text[1..].to_string();
                 Some(Token::Comma)
             }
+            '\\' => {
+                self.remaining_text = self.remaining_text[1..].to_string();
+                Some(Token::PredicateStart)
+            }
             // ':' introduces a function identifier, '?' introduces a predicate identifier and otherwise it is assumed to be an object identifier.
             ':' => {
                 let mut identifier = String::new();
@@ -142,10 +147,9 @@ impl Iterator for Tokenizer {
             }
             // The symbols =, <, >, <=, >=, != and IN are also predicate identifiers.
             '!' | '<' | '>' if self.remaining_text.chars().nth(1) == Some('=') => {
+                let text = self.remaining_text[..=1].to_string();
                 self.remaining_text = self.remaining_text["X=".len()..].to_string();
-                Some(Token::PredicateIdentifier(
-                    self.remaining_text[..=1].to_string(),
-                ))
+                Some(Token::PredicateIdentifier(text))
             }
             '=' | '<' | '>' => {
                 let identifier = self.remaining_text.chars().next().unwrap().to_string();
@@ -315,6 +319,7 @@ impl Parser {
         }
         match parts.get(0) {
             Some(ExpressionPart::Atomic(expression)) => expression.clone(),
+            None => panic!("Unexpected end of input"),
             _ => unreachable!(),
         }
     }
@@ -331,6 +336,11 @@ impl Parser {
             Some(Token::FunctionIdentifier(_))
             | Some(Token::PredicateIdentifier(_))
             | Some(Token::ObjectIdentifier(_)) => self.parse_predicate(tokenizer),
+            // Makes it possible to unambiguously write predicates beginning with a '(' character
+            Some(Token::PredicateStart) => {
+                tokenizer.next();
+                self.parse_predicate(tokenizer)
+            }
             _ => panic!("Unexpected token: {:?}", tokenizer.peek()),
         }
     }
@@ -645,7 +655,7 @@ mod test {
     #[test]
     fn test_function_compositions() {
         let parser = Parser::new();
-        let expression = parser.parse(":_(x+y)=7 -> :f(x, y+1) IN z".to_string());
+        let expression = parser.parse("\\(x+y)=7 -> :f(x, y+1) IN z".to_string());
         assert_eq!(
             expression,
             Expression::BinaryOperator(
@@ -654,14 +664,11 @@ mod test {
                     "=".to_string(),
                     vec![
                         Expression::Function(
-                            "_".to_string(),
-                            vec![Expression::Function(
-                                "+".to_string(),
-                                vec![
-                                    Expression::Object("x".to_string()),
-                                    Expression::Object("y".to_string())
-                                ]
-                            )]
+                            "+".to_string(),
+                            vec![
+                                Expression::Object("x".to_string()),
+                                Expression::Object("y".to_string())
+                            ]
                         ),
                         Expression::Object("7".to_string())
                     ]

@@ -31,13 +31,20 @@ mod parser;
 fn main() {
     loop {
         let mut input = String::new();
-        print!("Enter a formula: ");
+        print!("Axioms file name: ");
         std::io::stdout().lock().flush().unwrap();
         std::io::stdin().read_line(&mut input).unwrap();
         let input = input.trim().to_string();
         if input.is_empty() {
             break;
         }
-        println!("{:?}", Parser::new().parse(input));
+        // The axioms file has each line as an axiom
+        let axioms = std::fs::read_to_string(&input).unwrap();
+        let axioms = axioms
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| Parser::new().parse(line.to_string()))
+            .collect::<Vec<_>>();
+        println!("{:?}", axioms);
     }
 }
