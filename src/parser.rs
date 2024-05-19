@@ -12,7 +12,9 @@ enum Token {
     OpenBrace,
     CloseBrace,
     Comma,
-    Identifier(String),
+    PredicateIdentifier(String),
+    FunctionIdentifier(String),
+    ObjectIdentifier(String),
 }
 
 struct Tokenizer {
@@ -75,7 +77,7 @@ impl Iterator for Tokenizer {
                 self.remaining_text = self.remaining_text[2..].to_string();
                 Some(Token::BinaryOperator(BinaryOperator::Implies))
             }
-            '!' | '~' => {
+            '~' => {
                 self.remaining_text = self.remaining_text[1..].to_string();
                 Some(Token::Negation)
             }
@@ -99,6 +101,61 @@ impl Iterator for Tokenizer {
                 self.remaining_text = self.remaining_text[1..].to_string();
                 Some(Token::Comma)
             }
+            // ':' introduces a function identifier, '?' introduces a predicate identifier and otherwise it is assumed to be an object identifier.
+            ':' => {
+                let mut identifier = String::new();
+                for c in self.remaining_text.chars().skip(1) {
+                    if c.is_alphanumeric() || c == '_' {
+                        identifier.push(c);
+                    } else {
+                        break;
+                    }
+                }
+                if identifier.len() > 0 {
+                    self.remaining_text = self.remaining_text[identifier.len() + 1..].to_string();
+                    Some(Token::FunctionIdentifier(identifier))
+                } else {
+                    panic!("Unexpected character: {:?}", first_char);
+                }
+            }
+            // The symbols +, -, *, /, %, ^, & and | are also function identifiers.
+            '+' | '-' | '*' | '/' | '%' | '^' | '&' | '|' => {
+                let identifier = self.remaining_text.chars().next().unwrap().to_string();
+                self.remaining_text = self.remaining_text[1..].to_string();
+                Some(Token::FunctionIdentifier(identifier))
+            }
+            '?' => {
+                let mut identifier = String::new();
+                for c in self.remaining_text.chars().skip(1) {
+                    if c.is_alphanumeric() || c == '_' {
+                        identifier.push(c);
+                    } else {
+                        break;
+                    }
+                }
+                if identifier.len() > 0 {
+                    self.remaining_text = self.remaining_text[identifier.len() + 1..].to_string();
+                    Some(Token::PredicateIdentifier(identifier))
+                } else {
+                    panic!("Unexpected character: {:?}", first_char);
+                }
+            }
+            // The symbols =, <, >, <=, >=, != and IN are also predicate identifiers.
+            '!' | '<' | '>' if self.remaining_text.chars().nth(1) == Some('=') => {
+                self.remaining_text = self.remaining_text["X=".len()..].to_string();
+                Some(Token::PredicateIdentifier(
+                    self.remaining_text[..=1].to_string(),
+                ))
+            }
+            '=' | '<' | '>' => {
+                let identifier = self.remaining_text.chars().next().unwrap().to_string();
+                self.remaining_text = self.remaining_text[1..].to_string();
+                Some(Token::PredicateIdentifier(identifier))
+            }
+            'I' if self.remaining_text.starts_with("IN") => {
+                self.remaining_text = self.remaining_text["IN".len()..].to_string();
+                Some(Token::PredicateIdentifier("IN".to_string()))
+            }
             _ => {
                 let mut identifier = String::new();
                 for c in self.remaining_text.chars() {
@@ -110,7 +167,7 @@ impl Iterator for Tokenizer {
                 }
                 if identifier.len() > 0 {
                     self.remaining_text = self.remaining_text[identifier.len()..].to_string();
-                    Some(Token::Identifier(identifier))
+                    Some(Token::ObjectIdentifier(identifier))
                 } else {
                     panic!("Unexpected character: {:?}", first_char);
                 }
@@ -271,7 +328,9 @@ impl Parser {
                 let expression = self.parse_atomic_expression(tokenizer);
                 Expression::Negation(Box::new(expression))
             }
-            Some(Token::Identifier(_)) => self.parse_predicate(tokenizer),
+            Some(Token::FunctionIdentifier(_))
+            | Some(Token::PredicateIdentifier(_))
+            | Some(Token::ObjectIdentifier(_)) => self.parse_predicate(tokenizer),
             _ => panic!("Unexpected token: {:?}", tokenizer.peek()),
         }
     }
@@ -283,10 +342,10 @@ impl Parser {
             match tokenizer.next() {
                 Some(Token::Quantifier(quantifier)) => {
                     match tokenizer.peek() {
-                        Some(Token::Identifier(identifier)) => {
+                        Some(Token::ObjectIdentifier(identifier)) => {
                             quantifiers.push((quantifier.clone(), identifier.clone()));
                         }
-                        _ => panic!("Expected identifier, got {:?}", tokenizer.peek()),
+                        _ => panic!("Expected object identifier, got {:?}", tokenizer.peek()),
                     }
                     tokenizer.next();
                 }
@@ -306,56 +365,149 @@ impl Parser {
     }
 
     fn parse_predicate(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
-        // There are three forms of predicate: named predicates, function-like predicates and infix predicates.
-        // They all start with an identifier.
-        let first_identifier = match tokenizer.next() {
-            Some(Token::Identifier(identifier)) => identifier,
-            _ => panic!("Expected identifier, got {:?}", tokenizer.peek()),
+        // Predicates can be quite complex, so we need to handle a lot of different cases.
+        // Function calling ones are fairly straight forward; we just have to recurse to parse the arguments.
+        // Infix ones are more complex though due to syntactic ambiguities. For simplicity we'll require infix function calls to be surrounded by parentheses.
+        // Since they can't be chained, infix predicates don't need parentheses around them.
+        // The main rule is that there must be a predicate at the base level, possibly with functions and what not in the middle.
+        // Predicates may not appear in the middle of a function call or as arguments to another predicate. That is the job of logical operators.
+
+        let next_token = tokenizer.peek();
+        if let Some(Token::PredicateIdentifier(_)) = next_token {
+            // It is a predicate function
+            return self.parse_predicate_call(tokenizer);
+        }
+
+        // Otherwise it is infix
+        let mut arguments = Vec::new();
+        arguments.push(self.parse_predicate_argument(tokenizer));
+        let next_token = tokenizer.peek();
+        let operator = match next_token {
+            Some(Token::PredicateIdentifier(identifier)) => identifier.clone(),
+            _ => panic!("Expected predicate identifier, got {:?}", next_token),
         };
-        // function-like predicates now have a '('. infix predicates have another identifier. Anything else is a named predicate.
-        match tokenizer.peek().cloned() {
+        tokenizer.next();
+        arguments.push(self.parse_predicate_argument(tokenizer));
+        Expression::Predicate(operator, arguments)
+    }
+
+    fn parse_predicate_argument(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
+        let next_token = tokenizer.peek();
+        if let Some(Token::FunctionIdentifier(_)) = next_token {
+            self.parse_function_call(tokenizer)
+        } else if let Some(Token::ObjectIdentifier(identifier)) = next_token {
+            let identifier = identifier.clone();
+            tokenizer.next();
+            Expression::Object(identifier)
+        } else if let Some(Token::OpenParen) = next_token {
+            tokenizer.next();
+            let result = self.parse_function_expression(tokenizer);
+            assert_eq!(tokenizer.next(), Some(Token::CloseParen), "Expected ')'");
+            result
+        } else {
+            panic!(
+                "Expected function or object identifier, got {:?}",
+                next_token
+            );
+        }
+    }
+
+    fn parse_predicate_call(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
+        let predicate = match tokenizer.next() {
+            Some(Token::PredicateIdentifier(identifier)) => identifier,
+            _ => panic!("Expected predicate identifier, got {:?}", tokenizer.peek()),
+        };
+        match tokenizer.peek() {
+            Some(Token::OpenParen) => {}
+            _ => return Expression::Predicate(predicate, Vec::new()), // Just a named predicate
+        }
+        tokenizer.next();
+        let mut arguments = Vec::new();
+        loop {
+            if tokenizer.peek() == Some(&Token::CloseParen) {
+                tokenizer.next();
+                break;
+            }
+            arguments.push(self.parse_predicate_argument(tokenizer));
+            match tokenizer.peek() {
+                Some(Token::Comma) => {
+                    tokenizer.next();
+                }
+                Some(Token::CloseParen) => {
+                    tokenizer.next();
+                    break;
+                }
+                _ => panic!("Expected ',' or ')', got {:?}", tokenizer.peek()),
+            }
+        }
+        Expression::Predicate(predicate, arguments)
+    }
+
+    fn parse_function_call(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
+        let function = match tokenizer.next() {
+            Some(Token::FunctionIdentifier(identifier)) => identifier,
+            _ => panic!("Expected function identifier, got {:?}", tokenizer.peek()),
+        };
+        assert_eq!(tokenizer.next(), Some(Token::OpenParen), "Expected '('");
+        let mut arguments = Vec::new();
+        loop {
+            let next_token = tokenizer.peek();
+            if next_token == Some(&Token::CloseParen) {
+                break;
+            }
+            arguments.push(self.parse_function_expression(tokenizer));
+            match tokenizer.peek() {
+                Some(Token::Comma) => {
+                    tokenizer.next();
+                }
+                Some(Token::CloseParen) => {
+                    tokenizer.next();
+                    break;
+                }
+                _ => panic!("Expected ',' or ')', got {:?}", tokenizer.peek()),
+            }
+        }
+        Expression::Function(function, arguments)
+    }
+
+    fn parse_function_expression(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
+        // This is either an object, a function call or an infix function call.
+        let first_component = self.parse_function_argument(tokenizer);
+        let next_token = tokenizer.peek();
+        // If it is a function identifier, it is an infix function call.
+        // Otherwise we don't care.
+        if let Some(Token::FunctionIdentifier(_)) = next_token {
+            let next_token = tokenizer.next();
+            let operator = match next_token {
+                Some(Token::FunctionIdentifier(identifier)) => identifier,
+                _ => panic!("Expected function identifier, got {:?}", next_token),
+            };
+            let second_component = self.parse_function_argument(tokenizer);
+            Expression::Function(operator, vec![first_component, second_component])
+        } else {
+            first_component
+        }
+    }
+
+    fn parse_function_argument(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
+        let next_token = tokenizer.peek();
+        match next_token {
+            Some(Token::FunctionIdentifier(_)) => self.parse_function_call(tokenizer),
+            Some(Token::ObjectIdentifier(identifier)) => {
+                let identifier = identifier.clone();
+                tokenizer.next();
+                Expression::Object(identifier)
+            }
             Some(Token::OpenParen) => {
                 tokenizer.next();
-                let mut arguments = Vec::new();
-                loop {
-                    match tokenizer.peek() {
-                        Some(Token::CloseParen) => {
-                            break;
-                        }
-                        Some(Token::Identifier(argument)) => {
-                            arguments.push(argument.clone());
-                            tokenizer.next();
-                            match tokenizer.peek() {
-                                Some(Token::Comma) => {
-                                    tokenizer.next();
-                                }
-                                Some(Token::CloseParen) => {}
-                                _ => {
-                                    panic!("Expected ',' or ')', got {:?}", tokenizer.peek());
-                                }
-                            }
-                        }
-                        _ => {
-                            panic!("Expected identifier or ')', got {:?}", tokenizer.peek());
-                        }
-                    }
-                }
+                let result = self.parse_function_expression(tokenizer);
                 assert_eq!(tokenizer.next(), Some(Token::CloseParen), "Expected ')'");
-                Expression::Predicate(first_identifier, arguments)
+                result
             }
-            Some(Token::Identifier(second_identifier)) => {
-                tokenizer.next();
-                // The second identifier is the name of the predicate. The third one is the second argument (all infix predicates are binary).
-                let third_identifier = match tokenizer.next() {
-                    Some(Token::Identifier(identifier)) => identifier,
-                    _ => panic!("Expected identifier, got {:?}", tokenizer.peek()),
-                };
-                Expression::Predicate(
-                    second_identifier.clone(),
-                    vec![first_identifier, third_identifier],
-                )
-            }
-            _ => Expression::Predicate(first_identifier, Vec::new()),
+            _ => panic!(
+                "Expected function or object identifier, got {:?}",
+                next_token
+            ),
         }
     }
 }
@@ -367,7 +519,7 @@ mod test {
     #[test]
     fn test_parse_simple() {
         let parser = Parser::new();
-        let expression = parser.parse("(P(x) && Q(x)) -> R(x)".to_string());
+        let expression = parser.parse("(?P(x) && ?Q(x)) -> ?R(x)".to_string());
         assert_eq!(
             expression,
             Expression::BinaryOperator(
@@ -376,16 +528,16 @@ mod test {
                     BinaryOperator::And,
                     Box::new(Expression::Predicate(
                         "P".to_string(),
-                        vec!["x".to_string()]
+                        vec![Expression::Object("x".to_string())]
                     )),
                     Box::new(Expression::Predicate(
                         "Q".to_string(),
-                        vec!["x".to_string()]
+                        vec![Expression::Object("x".to_string())]
                     ))
                 )),
                 Box::new(Expression::Predicate(
                     "R".to_string(),
-                    vec!["x".to_string()]
+                    vec![Expression::Object("x".to_string())]
                 ))
             )
         );
@@ -394,7 +546,7 @@ mod test {
     #[test]
     fn test_parse_quantifier_chain() {
         let parser = Parser::new();
-        let expression = parser.parse("for all x there exists z { P(x, z) }".to_string());
+        let expression = parser.parse("for all x there exists z {?P(x, z)}".to_string());
         assert_eq!(
             expression,
             Expression::QuantifierChain(
@@ -404,7 +556,10 @@ mod test {
                 ],
                 Box::new(Expression::Predicate(
                     "P".to_string(),
-                    vec!["x".to_string(), "z".to_string()]
+                    vec![
+                        Expression::Object("x".to_string()),
+                        Expression::Object("z".to_string())
+                    ]
                 ))
             )
         );
@@ -413,7 +568,7 @@ mod test {
     #[test]
     fn test_parse_operator_precedence() {
         let parser = Parser::new();
-        let expression = parser.parse("P(x) && Q(x) || R(x) -> S(x) <-> T(x)".to_string());
+        let expression = parser.parse("?P(x) && ?Q(x) || ?R(x) -> ?S(x) <-> ?T(x)".to_string());
         assert_eq!(
             expression,
             Expression::BinaryOperator(
@@ -422,11 +577,11 @@ mod test {
                     BinaryOperator::And,
                     Box::new(Expression::Predicate(
                         "P".to_string(),
-                        vec!["x".to_string()]
+                        vec![Expression::Object("x".to_string())]
                     )),
                     Box::new(Expression::Predicate(
                         "Q".to_string(),
-                        vec!["x".to_string()]
+                        vec![Expression::Object("x".to_string())]
                     ))
                 )),
                 Box::new(Expression::BinaryOperator(
@@ -435,16 +590,16 @@ mod test {
                         BinaryOperator::Implies,
                         Box::new(Expression::Predicate(
                             "R".to_string(),
-                            vec!["x".to_string()]
+                            vec![Expression::Object("x".to_string())]
                         )),
                         Box::new(Expression::Predicate(
                             "S".to_string(),
-                            vec!["x".to_string()]
+                            vec![Expression::Object("x".to_string())]
                         ))
                     )),
                     Box::new(Expression::Predicate(
                         "T".to_string(),
-                        vec!["x".to_string()]
+                        vec![Expression::Object("x".to_string())]
                     )),
                 ))
             )
@@ -454,22 +609,81 @@ mod test {
     #[test]
     fn test_negated_predicates() {
         let parser = Parser::new();
-        let expression = parser.parse("P && !Q(x) && x IS y".to_string());
+        let expression = parser.parse("~?P && ~:Q(x) ?SUBSET z && x IN y".to_string());
         assert_eq!(
             expression,
             Expression::BinaryOperator(
                 BinaryOperator::And,
                 Box::new(Expression::BinaryOperator(
                     BinaryOperator::And,
-                    Box::new(Expression::Predicate("P".to_string(), Vec::new())),
                     Box::new(Expression::Negation(Box::new(Expression::Predicate(
-                        "Q".to_string(),
-                        vec!["x".to_string()]
+                        "P".to_string(),
+                        Vec::new()
+                    )))),
+                    Box::new(Expression::Negation(Box::new(Expression::Predicate(
+                        "SUBSET".to_string(),
+                        vec![
+                            Expression::Function(
+                                "Q".to_string(),
+                                vec![Expression::Object("x".to_string())]
+                            ),
+                            Expression::Object("z".to_string())
+                        ]
                     ))))
                 )),
                 Box::new(Expression::Predicate(
-                    "IS".to_string(),
-                    vec!["x".to_string(), "y".to_string()]
+                    "IN".to_string(),
+                    vec![
+                        Expression::Object("x".to_string()),
+                        Expression::Object("y".to_string())
+                    ]
+                ))
+            )
+        );
+    }
+
+    #[test]
+    fn test_function_compositions() {
+        let parser = Parser::new();
+        let expression = parser.parse(":_(x+y)=7 -> :f(x, y+1) IN z".to_string());
+        assert_eq!(
+            expression,
+            Expression::BinaryOperator(
+                BinaryOperator::Implies,
+                Box::new(Expression::Predicate(
+                    "=".to_string(),
+                    vec![
+                        Expression::Function(
+                            "_".to_string(),
+                            vec![Expression::Function(
+                                "+".to_string(),
+                                vec![
+                                    Expression::Object("x".to_string()),
+                                    Expression::Object("y".to_string())
+                                ]
+                            )]
+                        ),
+                        Expression::Object("7".to_string())
+                    ]
+                )),
+                Box::new(Expression::Predicate(
+                    "IN".to_string(),
+                    vec![
+                        Expression::Function(
+                            "f".to_string(),
+                            vec![
+                                Expression::Object("x".to_string()),
+                                Expression::Function(
+                                    "+".to_string(),
+                                    vec![
+                                        Expression::Object("y".to_string()),
+                                        Expression::Object("1".to_string())
+                                    ]
+                                )
+                            ]
+                        ),
+                        Expression::Object("z".to_string())
+                    ]
                 ))
             )
         );

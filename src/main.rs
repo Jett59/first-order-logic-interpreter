@@ -20,7 +20,9 @@ enum BinaryOperator {
 enum Expression {
     QuantifierChain(Vec<(Quantifier, String)>, Box<Expression>),
     BinaryOperator(BinaryOperator, Box<Expression>, Box<Expression>),
-    Predicate(String, Vec<String>),
+    Predicate(String, Vec<Expression>),
+    Object(String),
+    Function(String, Vec<Expression>),
     Negation(Box<Expression>),
 }
 
