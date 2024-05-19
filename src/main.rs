@@ -16,7 +16,7 @@ enum BinaryOperator {
     EquivalentTo,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Expression {
     QuantifierChain(Vec<(Quantifier, String)>, Box<Expression>),
     BinaryOperator(BinaryOperator, Box<Expression>, Box<Expression>),

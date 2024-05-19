@@ -359,3 +359,119 @@ impl Parser {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_parse_simple() {
+        let parser = Parser::new();
+        let expression = parser.parse("(P(x) && Q(x)) -> R(x)".to_string());
+        assert_eq!(
+            expression,
+            Expression::BinaryOperator(
+                BinaryOperator::Implies,
+                Box::new(Expression::BinaryOperator(
+                    BinaryOperator::And,
+                    Box::new(Expression::Predicate(
+                        "P".to_string(),
+                        vec!["x".to_string()]
+                    )),
+                    Box::new(Expression::Predicate(
+                        "Q".to_string(),
+                        vec!["x".to_string()]
+                    ))
+                )),
+                Box::new(Expression::Predicate(
+                    "R".to_string(),
+                    vec!["x".to_string()]
+                ))
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_quantifier_chain() {
+        let parser = Parser::new();
+        let expression = parser.parse("for all x there exists z { P(x, z) }".to_string());
+        assert_eq!(
+            expression,
+            Expression::QuantifierChain(
+                vec![
+                    (Quantifier::ForAll, "x".to_string()),
+                    (Quantifier::ThereExists, "z".to_string())
+                ],
+                Box::new(Expression::Predicate(
+                    "P".to_string(),
+                    vec!["x".to_string(), "z".to_string()]
+                ))
+            )
+        );
+    }
+
+    #[test]
+    fn test_parse_operator_precedence() {
+        let parser = Parser::new();
+        let expression = parser.parse("P(x) && Q(x) || R(x) -> S(x) <-> T(x)".to_string());
+        assert_eq!(
+            expression,
+            Expression::BinaryOperator(
+                BinaryOperator::Or,
+                Box::new(Expression::BinaryOperator(
+                    BinaryOperator::And,
+                    Box::new(Expression::Predicate(
+                        "P".to_string(),
+                        vec!["x".to_string()]
+                    )),
+                    Box::new(Expression::Predicate(
+                        "Q".to_string(),
+                        vec!["x".to_string()]
+                    ))
+                )),
+                Box::new(Expression::BinaryOperator(
+                    BinaryOperator::EquivalentTo,
+                    Box::new(Expression::BinaryOperator(
+                        BinaryOperator::Implies,
+                        Box::new(Expression::Predicate(
+                            "R".to_string(),
+                            vec!["x".to_string()]
+                        )),
+                        Box::new(Expression::Predicate(
+                            "S".to_string(),
+                            vec!["x".to_string()]
+                        ))
+                    )),
+                    Box::new(Expression::Predicate(
+                        "T".to_string(),
+                        vec!["x".to_string()]
+                    )),
+                ))
+            )
+        );
+    }
+
+    #[test]
+    fn test_negated_predicates() {
+        let parser = Parser::new();
+        let expression = parser.parse("P && !Q(x) && x IS y".to_string());
+        assert_eq!(
+            expression,
+            Expression::BinaryOperator(
+                BinaryOperator::And,
+                Box::new(Expression::BinaryOperator(
+                    BinaryOperator::And,
+                    Box::new(Expression::Predicate("P".to_string(), Vec::new())),
+                    Box::new(Expression::Negation(Box::new(Expression::Predicate(
+                        "Q".to_string(),
+                        vec!["x".to_string()]
+                    ))))
+                )),
+                Box::new(Expression::Predicate(
+                    "IS".to_string(),
+                    vec!["x".to_string(), "y".to_string()]
+                ))
+            )
+        );
+    }
+}
