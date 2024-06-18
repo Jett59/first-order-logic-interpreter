@@ -1,17 +1,18 @@
-for all x for all y {x=y <-> for all z {z IN x <-> z IN y}}
-for all x for all y there exists z {x IN z && y IN z}
+∀x {x=x}
+∀x∀y {y=x ⇔ x=y}
+∀x∀y∀z {(x=y && y=z) ⇒ x=z}
 
-for all n {n=(n+0)}
-for all n {n=(n*1)}
+∀n {n=(n+0)}
+∀n {n=(n*1)}
 0 != 1
 
-for all a for all b for all c {\(a+(b+c))=((a+b)+c)}
-for all a for all b for all c {\(a*(b*c))=((a*b)*c)}
+∀a∀b∀c {\(a+(b+c))=((a+b)+c)}
+∀a∀b∀c {\(a*(b*c))=((a*b)*c)}
 
-for all a for all b {\(a+b)=(b+a)}
-for all a for all b {\(a*b)=(b*a)}
+∀a∀b {\(a+b)=(b+a)}
+∀a∀b {\(a*b)=(b*a)}
 
-for all a there exists negative_a {0=(a+negative_a)}
-for all a there exists a_inverse {1=(a*a_inverse)}
+∀a∃negative_a {0=(a+negative_a)}
+∀a∃a_inverse {1=(a*a_inverse)}
 
-for all a for all b for all c {\(c*(a+b))=((c*a)+(c*b))}
+∀a∀b∀c {\(c*(a+b))=((c*a)+(c*b))}

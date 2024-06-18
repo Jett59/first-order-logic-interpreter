@@ -1,14 +1,14 @@
 use std::io::Write;
 
-use crate::parser::Parser;
+use crate::{inference::generate_implication_table, parser::Parser};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Quantifier {
     ForAll,
     ThereExists,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BinaryOperator {
     And,
     Or,
@@ -16,7 +16,7 @@ enum BinaryOperator {
     EquivalentTo,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Expression {
     QuantifierChain(Vec<(Quantifier, String)>, Box<Expression>),
     BinaryOperator(BinaryOperator, Box<Expression>, Box<Expression>),
@@ -26,6 +26,7 @@ enum Expression {
     Negation(Box<Expression>),
 }
 
+mod inference;
 mod parser;
 
 fn main() {
@@ -45,6 +46,12 @@ fn main() {
             .filter(|line| !line.trim().is_empty())
             .map(|line| Parser::new().parse(line.to_string()))
             .collect::<Vec<_>>();
-        println!("{:?}", axioms);
+        for axiom in axioms {
+            println!("{:?}", axiom);
+            let implications = generate_implication_table(&axiom);
+            for (key, value) in implications {
+                println!("{:?} => {:?}", key, value);
+            }
+        }
     }
 }

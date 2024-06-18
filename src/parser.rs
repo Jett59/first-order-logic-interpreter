@@ -44,22 +44,13 @@ impl Iterator for Tokenizer {
                 self.remaining_text = self.remaining_text[1..].to_string();
                 self.next()
             }
-            'f' | 'F'
-                if self
-                    .remaining_text
-                    .to_ascii_lowercase()
-                    .starts_with("for all") =>
-            {
-                self.remaining_text = self.remaining_text["for all".len()..].to_string();
+            '∀' => {
+                // For some reason this uses byte indices, so we have to adjust accordingly for unicode characters.
+                self.remaining_text.remove(0);
                 Some(Token::Quantifier(Quantifier::ForAll))
             }
-            't' | 'T'
-                if self
-                    .remaining_text
-                    .to_ascii_lowercase()
-                    .starts_with("there exists") =>
-            {
-                self.remaining_text = self.remaining_text["there exists".len()..].to_string();
+            '∃' => {
+                self.remaining_text.remove(0);
                 Some(Token::Quantifier(Quantifier::ThereExists))
             }
             '&' if self.remaining_text.starts_with("&&") => {
@@ -70,12 +61,12 @@ impl Iterator for Tokenizer {
                 self.remaining_text = self.remaining_text[2..].to_string();
                 Some(Token::BinaryOperator(BinaryOperator::Or))
             }
-            '<' if self.remaining_text.starts_with("<->") => {
-                self.remaining_text = self.remaining_text[3..].to_string();
+            '⇔' => {
+                self.remaining_text.remove(0);
                 Some(Token::BinaryOperator(BinaryOperator::EquivalentTo))
             }
-            '-' if self.remaining_text.starts_with("->") => {
-                self.remaining_text = self.remaining_text[2..].to_string();
+            '⇒' => {
+                self.remaining_text.remove(0);
                 Some(Token::BinaryOperator(BinaryOperator::Implies))
             }
             '~' => {
@@ -145,7 +136,7 @@ impl Iterator for Tokenizer {
                     panic!("Unexpected character: {:?}", first_char);
                 }
             }
-            // The symbols =, <, >, <=, >=, != and IN are also predicate identifiers.
+            // The symbols =, <, >, <=, >=, != and ∈ are also predicate identifiers.
             '!' | '<' | '>' if self.remaining_text.chars().nth(1) == Some('=') => {
                 let text = self.remaining_text[..=1].to_string();
                 self.remaining_text = self.remaining_text["X=".len()..].to_string();
@@ -156,9 +147,9 @@ impl Iterator for Tokenizer {
                 self.remaining_text = self.remaining_text[1..].to_string();
                 Some(Token::PredicateIdentifier(identifier))
             }
-            'I' if self.remaining_text.starts_with("IN") => {
-                self.remaining_text = self.remaining_text["IN".len()..].to_string();
-                Some(Token::PredicateIdentifier("IN".to_string()))
+            '∈' => {
+                self.remaining_text.remove(0);
+                Some(Token::PredicateIdentifier("∈".to_string()))
             }
             _ => {
                 let mut identifier = String::new();
@@ -529,7 +520,7 @@ mod test {
     #[test]
     fn test_parse_simple() {
         let parser = Parser::new();
-        let expression = parser.parse("(?P(x) && ?Q(x)) -> ?R(x)".to_string());
+        let expression = parser.parse("(?P(x) && ?Q(x)) ⇒ ?R(x)".to_string());
         assert_eq!(
             expression,
             Expression::BinaryOperator(
@@ -556,7 +547,7 @@ mod test {
     #[test]
     fn test_parse_quantifier_chain() {
         let parser = Parser::new();
-        let expression = parser.parse("for all x there exists z {?P(x, z)}".to_string());
+        let expression = parser.parse("∀x∃z {?P(x, z)}".to_string());
         assert_eq!(
             expression,
             Expression::QuantifierChain(
@@ -578,7 +569,7 @@ mod test {
     #[test]
     fn test_parse_operator_precedence() {
         let parser = Parser::new();
-        let expression = parser.parse("?P(x) && ?Q(x) || ?R(x) -> ?S(x) <-> ?T(x)".to_string());
+        let expression = parser.parse("?P(x) && ?Q(x) || ?R(x) ⇒ ?S(x) ⇔ ?T(x)".to_string());
         assert_eq!(
             expression,
             Expression::BinaryOperator(
@@ -619,7 +610,7 @@ mod test {
     #[test]
     fn test_negated_predicates() {
         let parser = Parser::new();
-        let expression = parser.parse("~?P && ~:Q(x) ?SUBSET z && x IN y".to_string());
+        let expression = parser.parse("~?P && ~:Q(x) ?SUBSET z && x ∈ y".to_string());
         assert_eq!(
             expression,
             Expression::BinaryOperator(
@@ -642,7 +633,7 @@ mod test {
                     ))))
                 )),
                 Box::new(Expression::Predicate(
-                    "IN".to_string(),
+                    "∈".to_string(),
                     vec![
                         Expression::Object("x".to_string()),
                         Expression::Object("y".to_string())
@@ -655,7 +646,7 @@ mod test {
     #[test]
     fn test_function_compositions() {
         let parser = Parser::new();
-        let expression = parser.parse("\\(x+y)=7 -> :f(x, y+1) IN z".to_string());
+        let expression = parser.parse("\\(x+y)=7 ⇒ :f(x, y+1) ∈ z".to_string());
         assert_eq!(
             expression,
             Expression::BinaryOperator(
@@ -674,7 +665,7 @@ mod test {
                     ]
                 )),
                 Box::new(Expression::Predicate(
-                    "IN".to_string(),
+                    "∈".to_string(),
                     vec![
                         Expression::Function(
                             "f".to_string(),
