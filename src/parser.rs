@@ -1,689 +1,117 @@
-use std::iter::Peekable;
+use std::{iter::Peekable, str::Chars};
 
-use crate::{BinaryOperator, Expression, Quantifier};
+use crate::formula::{Formula, LogicalOperator};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Token {
-    Quantifier(Quantifier),
-    BinaryOperator(BinaryOperator),
-    Negation,
-    OpenParen,
-    CloseParen,
-    OpenBrace,
-    CloseBrace,
-    Comma,
-    PredicateStart,
-    PredicateIdentifier(String),
-    FunctionIdentifier(String),
-    ObjectIdentifier(String),
+struct Tokenizer<Iter>
+where
+    Iter: Iterator<Item = char>,
+{
+    characters: Peekable<Iter>,
 }
 
-struct Tokenizer {
-    remaining_text: String,
-}
-
-impl Tokenizer {
-    fn new(text: String) -> Tokenizer {
+impl<Iter> Tokenizer<Iter>
+where
+    Iter: Iterator<Item = char>,
+{
+    fn new(characters: Iter) -> Self {
         Tokenizer {
-            remaining_text: text,
+            characters: characters.peekable(),
         }
     }
 }
 
-impl Iterator for Tokenizer {
-    type Item = Token;
+impl<Iter> Iterator for Tokenizer<Iter>
+where
+    Iter: Iterator<Item = char>,
+{
+    type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining_text.is_empty() {
-            return None;
+        let mut token = String::new();
+        while let Some(character) = self.characters.peek() {
+            if character.is_whitespace() {
+                if !token.is_empty() {
+                    return Some(token);
+                } else {
+                    self.characters.next();
+                }
+            } else if character.is_alphanumeric() || character == &'_' {
+                token.push(self.characters.next().unwrap());
+            } else {
+                if !token.is_empty() {
+                    return Some(token);
+                } else {
+                    return Some(self.characters.next().unwrap().to_string());
+                }
+            }
         }
-
-        let first_char = self.remaining_text.chars().next().unwrap();
-        match first_char {
-            ' ' => {
-                self.remaining_text = self.remaining_text[1..].to_string();
-                self.next()
-            }
-            '∀' => {
-                // For some reason this uses byte indices, so we have to adjust accordingly for unicode characters.
-                self.remaining_text.remove(0);
-                Some(Token::Quantifier(Quantifier::ForAll))
-            }
-            '∃' => {
-                self.remaining_text.remove(0);
-                Some(Token::Quantifier(Quantifier::ThereExists))
-            }
-            '&' if self.remaining_text.starts_with("&&") => {
-                self.remaining_text = self.remaining_text[2..].to_string();
-                Some(Token::BinaryOperator(BinaryOperator::And))
-            }
-            '|' if self.remaining_text.starts_with("||") => {
-                self.remaining_text = self.remaining_text[2..].to_string();
-                Some(Token::BinaryOperator(BinaryOperator::Or))
-            }
-            '⇔' => {
-                self.remaining_text.remove(0);
-                Some(Token::BinaryOperator(BinaryOperator::EquivalentTo))
-            }
-            '⇒' => {
-                self.remaining_text.remove(0);
-                Some(Token::BinaryOperator(BinaryOperator::Implies))
-            }
-            '~' => {
-                self.remaining_text = self.remaining_text[1..].to_string();
-                Some(Token::Negation)
-            }
-            '(' => {
-                self.remaining_text = self.remaining_text[1..].to_string();
-                Some(Token::OpenParen)
-            }
-            ')' => {
-                self.remaining_text = self.remaining_text[1..].to_string();
-                Some(Token::CloseParen)
-            }
-            '{' => {
-                self.remaining_text = self.remaining_text[1..].to_string();
-                Some(Token::OpenBrace)
-            }
-            '}' => {
-                self.remaining_text = self.remaining_text[1..].to_string();
-                Some(Token::CloseBrace)
-            }
-            ',' => {
-                self.remaining_text = self.remaining_text[1..].to_string();
-                Some(Token::Comma)
-            }
-            '\\' => {
-                self.remaining_text = self.remaining_text[1..].to_string();
-                Some(Token::PredicateStart)
-            }
-            // ':' introduces a function identifier, '?' introduces a predicate identifier and otherwise it is assumed to be an object identifier.
-            ':' => {
-                let mut identifier = String::new();
-                for c in self.remaining_text.chars().skip(1) {
-                    if c.is_alphanumeric() || c == '_' {
-                        identifier.push(c);
-                    } else {
-                        break;
-                    }
-                }
-                if identifier.len() > 0 {
-                    self.remaining_text = self.remaining_text[identifier.len() + 1..].to_string();
-                    Some(Token::FunctionIdentifier(identifier))
-                } else {
-                    panic!("Unexpected character: {:?}", first_char);
-                }
-            }
-            // The symbols +, -, *, /, %, ^, & and | are also function identifiers.
-            '+' | '-' | '*' | '/' | '%' | '^' | '&' | '|' => {
-                let identifier = self.remaining_text.chars().next().unwrap().to_string();
-                self.remaining_text = self.remaining_text[1..].to_string();
-                Some(Token::FunctionIdentifier(identifier))
-            }
-            '?' => {
-                let mut identifier = String::new();
-                for c in self.remaining_text.chars().skip(1) {
-                    if c.is_alphanumeric() || c == '_' {
-                        identifier.push(c);
-                    } else {
-                        break;
-                    }
-                }
-                if identifier.len() > 0 {
-                    self.remaining_text = self.remaining_text[identifier.len() + 1..].to_string();
-                    Some(Token::PredicateIdentifier(identifier))
-                } else {
-                    panic!("Unexpected character: {:?}", first_char);
-                }
-            }
-            // The symbols =, <, >, <=, >=, != and ∈ are also predicate identifiers.
-            '!' | '<' | '>' if self.remaining_text.chars().nth(1) == Some('=') => {
-                let text = self.remaining_text[..=1].to_string();
-                self.remaining_text = self.remaining_text["X=".len()..].to_string();
-                Some(Token::PredicateIdentifier(text))
-            }
-            '=' | '<' | '>' => {
-                let identifier = self.remaining_text.chars().next().unwrap().to_string();
-                self.remaining_text = self.remaining_text[1..].to_string();
-                Some(Token::PredicateIdentifier(identifier))
-            }
-            '∈' => {
-                self.remaining_text.remove(0);
-                Some(Token::PredicateIdentifier("∈".to_string()))
-            }
-            _ => {
-                let mut identifier = String::new();
-                for c in self.remaining_text.chars() {
-                    if c.is_alphanumeric() || c == '_' {
-                        identifier.push(c);
-                    } else {
-                        break;
-                    }
-                }
-                if identifier.len() > 0 {
-                    self.remaining_text = self.remaining_text[identifier.len()..].to_string();
-                    Some(Token::ObjectIdentifier(identifier))
-                } else {
-                    panic!("Unexpected character: {:?}", first_char);
-                }
-            }
+        if !token.is_empty() {
+            Some(token)
+        } else {
+            None
         }
     }
 }
 
-pub struct Parser {}
+pub struct Parser<'a> {
+    tokenizer: Peekable<Tokenizer<Chars<'a>>>,
+}
 
-impl Parser {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    pub fn parse(&self, text: String) -> Expression {
-        let mut tokenizer = Tokenizer::new(text).peekable();
-        self.parse_expression(&mut tokenizer, None)
-    }
-
-    fn parse_expression(
-        &self,
-        tokenizer: &mut Peekable<Tokenizer>,
-        close: Option<Token>,
-    ) -> Expression {
-        // Expressions are strings of 'atomic' expressions separated with binary operators.
-        // First, we just parse all of the atomic expressions. Then we go through and sort out the binary operators, taking care to respect operator precedence.
-        enum ExpressionPart {
-            Atomic(Expression),
-            BinaryOperator(BinaryOperator),
-        }
-        let mut parts = Vec::new();
-        loop {
-            match tokenizer.peek() {
-                token if token == close.as_ref() => {
-                    break;
-                }
-                Some(Token::BinaryOperator(binary_operator)) => {
-                    match parts.last() {
-                        Some(ExpressionPart::Atomic(_)) => {}
-                        _ => panic!("Expected atomic expression, got {:?}", binary_operator),
-                    }
-                    parts.push(ExpressionPart::BinaryOperator(*binary_operator));
-                    tokenizer.next();
-                }
-                Some(Token::OpenParen) => {
-                    tokenizer.next();
-                    let expression = self.parse_expression(tokenizer, Some(Token::CloseParen));
-                    parts.push(ExpressionPart::Atomic(expression));
-                    assert_eq!(tokenizer.next(), Some(Token::CloseParen), "Expected ')'");
-                }
-                _ => {
-                    match parts.last() {
-                        Some(ExpressionPart::Atomic(_)) => {
-                            panic!("Expected binary operator, got {:?}", tokenizer.peek())
-                        }
-                        _ => {}
-                    }
-                    let atomic_expression = self.parse_atomic_expression(tokenizer);
-                    parts.push(ExpressionPart::Atomic(atomic_expression));
-                }
-            }
-        }
-        // Operator precedence: Implies/EquivalentTo > And > Or
-        // First we handle implies and equivalent to.
-        let mut i = 0;
-        while i < parts.len() {
-            match parts[i] {
-                ExpressionPart::BinaryOperator(binary_operator)
-                    if binary_operator == BinaryOperator::Implies
-                        || binary_operator == BinaryOperator::EquivalentTo =>
-                {
-                    let left = match parts.get(i - 1) {
-                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
-                        _ => unreachable!(),
-                    };
-                    let right = match parts.get(i + 1) {
-                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
-                        _ => unreachable!(),
-                    };
-                    parts.drain(i - 1..=i + 1);
-                    parts.insert(
-                        i - 1,
-                        ExpressionPart::Atomic(Expression::BinaryOperator(
-                            binary_operator,
-                            Box::new(left),
-                            Box::new(right),
-                        )),
-                    );
-                }
-                _ => i += 1,
-            }
-        }
-        // Next we handle and.
-        let mut i = 0;
-        while i < parts.len() {
-            match parts[i] {
-                ExpressionPart::BinaryOperator(BinaryOperator::And) => {
-                    let left = match parts.get(i - 1) {
-                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
-                        _ => unreachable!(),
-                    };
-                    let right = match parts.get(i + 1) {
-                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
-                        _ => unreachable!(),
-                    };
-                    parts.drain(i - 1..=i + 1);
-                    parts.insert(
-                        i - 1,
-                        ExpressionPart::Atomic(Expression::BinaryOperator(
-                            BinaryOperator::And,
-                            Box::new(left),
-                            Box::new(right),
-                        )),
-                    );
-                }
-                _ => i += 1,
-            }
-        }
-        // Finally we handle or.
-        let mut i = 0;
-        while i < parts.len() {
-            match parts[i] {
-                ExpressionPart::BinaryOperator(BinaryOperator::Or) => {
-                    let left = match parts.get(i - 1) {
-                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
-                        _ => unreachable!(),
-                    };
-                    let right = match parts.get(i + 1) {
-                        Some(ExpressionPart::Atomic(expression)) => expression.clone(),
-                        _ => unreachable!(),
-                    };
-                    parts.drain(i - 1..=i + 1);
-                    parts.insert(
-                        i - 1,
-                        ExpressionPart::Atomic(Expression::BinaryOperator(
-                            BinaryOperator::Or,
-                            Box::new(left),
-                            Box::new(right),
-                        )),
-                    );
-                }
-                _ => i += 1,
-            }
-        }
-        match parts.get(0) {
-            Some(ExpressionPart::Atomic(expression)) => expression.clone(),
-            None => panic!("Unexpected end of input"),
-            _ => unreachable!(),
+impl<'a> Parser<'a> {
+    fn new(expression: &'a str) -> Self {
+        Parser {
+            tokenizer: Tokenizer::new(expression.chars()).peekable(),
         }
     }
 
-    fn parse_atomic_expression(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
-        // Atomic expressions are quantifier chains, negations and predicates.
-        match tokenizer.peek() {
-            Some(Token::Quantifier(_)) => self.parse_quantifier_chain(tokenizer),
-            Some(Token::Negation) => {
-                tokenizer.next();
-                let expression = self.parse_atomic_expression(tokenizer);
-                Expression::Negation(Box::new(expression))
-            }
-            Some(Token::FunctionIdentifier(_))
-            | Some(Token::PredicateIdentifier(_))
-            | Some(Token::ObjectIdentifier(_)) => self.parse_predicate(tokenizer),
-            // Makes it possible to unambiguously write predicates beginning with a '(' character
-            Some(Token::PredicateStart) => {
-                tokenizer.next();
-                self.parse_predicate(tokenizer)
-            }
-            _ => panic!("Unexpected token: {:?}", tokenizer.peek()),
-        }
-    }
-
-    fn parse_quantifier_chain(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
-        // Quantifier chains are some number of `for all` or `there exists` quantifiers followed by an expression in braces.
-        let mut quantifiers = Vec::new();
-        loop {
-            match tokenizer.next() {
-                Some(Token::Quantifier(quantifier)) => {
-                    match tokenizer.peek() {
-                        Some(Token::ObjectIdentifier(identifier)) => {
-                            quantifiers.push((quantifier.clone(), identifier.clone()));
-                        }
-                        _ => panic!("Expected object identifier, got {:?}", tokenizer.peek()),
-                    }
-                    tokenizer.next();
-                }
-                Some(Token::OpenBrace) => {
-                    break;
-                }
-                _ => panic!(
-                    "Expected quantifier or open brace, got {:?}",
-                    tokenizer.peek()
-                ),
-            }
-        }
-        assert!(!quantifiers.is_empty(), "Expected at least one quantifier");
-        let expression = self.parse_expression(tokenizer, Some(Token::CloseBrace));
-        assert_eq!(tokenizer.next(), Some(Token::CloseBrace), "Expected '}}'");
-        Expression::QuantifierChain(quantifiers, Box::new(expression))
-    }
-
-    fn parse_predicate(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
-        // Predicates can be quite complex, so we need to handle a lot of different cases.
-        // Function calling ones are fairly straight forward; we just have to recurse to parse the arguments.
-        // Infix ones are more complex though due to syntactic ambiguities. For simplicity we'll require infix function calls to be surrounded by parentheses.
-        // Since they can't be chained, infix predicates don't need parentheses around them.
-        // The main rule is that there must be a predicate at the base level, possibly with functions and what not in the middle.
-        // Predicates may not appear in the middle of a function call or as arguments to another predicate. That is the job of logical operators.
-
-        let next_token = tokenizer.peek();
-        if let Some(Token::PredicateIdentifier(_)) = next_token {
-            // It is a predicate function
-            return self.parse_predicate_call(tokenizer);
-        }
-
-        // Otherwise it is infix
-        let mut arguments = Vec::new();
-        arguments.push(self.parse_predicate_argument(tokenizer));
-        let next_token = tokenizer.peek();
-        let operator = match next_token {
-            Some(Token::PredicateIdentifier(identifier)) => identifier.clone(),
-            _ => panic!("Expected predicate identifier, got {:?}", next_token),
-        };
-        tokenizer.next();
-        arguments.push(self.parse_predicate_argument(tokenizer));
-        Expression::Predicate(operator, arguments)
-    }
-
-    fn parse_predicate_argument(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
-        let next_token = tokenizer.peek();
-        if let Some(Token::FunctionIdentifier(_)) = next_token {
-            self.parse_function_call(tokenizer)
-        } else if let Some(Token::ObjectIdentifier(identifier)) = next_token {
-            let identifier = identifier.clone();
-            tokenizer.next();
-            Expression::Object(identifier)
-        } else if let Some(Token::OpenParen) = next_token {
-            tokenizer.next();
-            let result = self.parse_function_expression(tokenizer);
-            assert_eq!(tokenizer.next(), Some(Token::CloseParen), "Expected ')'");
+    pub fn parse(expression: &'a str) -> Result<Formula, String> {
+        let mut parser = Parser::new(expression);
+        let result = parser.parse_formula();
+        if parser.tokenizer.peek().is_some() {
+            Err(format!(
+                "Unexpected token: {}",
+                parser.tokenizer.next().unwrap()
+            ))
+        } else {
             result
+        }
+    }
+
+    fn parse_formula(&mut self) -> Result<Formula, String> {
+        let next_token = self.tokenizer.next().ok_or("Unexpected end of input")?;
+        if next_token == "¬" {
+            let formula = self.parse_formula()?;
+            Ok(Formula::Compound(LogicalOperator::Not, vec![formula]))
+        } else if next_token == "(" {
+            let left = self.parse_formula()?;
+            let operator = self.tokenizer.next().ok_or("Unexpected end of input")?;
+            let right = self.parse_formula()?;
+            if self.tokenizer.peek() != Some(&")".to_string()) {
+                return Err(format!(
+                    "Expected ')', found: {}",
+                    self.tokenizer.next().unwrap()
+                ));
+            }
+            self.tokenizer.next();
+            if let Ok(logical_operator) = LogicalOperator::try_from(operator.as_str()) {
+                Ok(Formula::Compound(logical_operator, vec![left, right]))
+            } else {
+                Err(format!("Invalid logical operator: {}", operator))
+            }
+        } else if next_token == "∀" {
+            let variable = self.tokenizer.next().ok_or("Unexpected end of input")?;
+            let formula = self.parse_formula()?;
+            Ok(Formula::Universal(variable, Box::new(formula)))
+        } else if next_token == "∃" {
+            let variable = self.tokenizer.next().ok_or("Unexpected end of input")?;
+            let formula = self.parse_formula()?;
+            Ok(Formula::Existential(variable, Box::new(formula)))
         } else {
-            panic!(
-                "Expected function or object identifier, got {:?}",
-                next_token
-            );
+            // The only kind of atomic formula we handle is the binary atomic formula (eg "x∈y")
+            let left = next_token;
+            let operator = self.tokenizer.next().ok_or("Unexpected end of input")?;
+            let right = self.tokenizer.next().ok_or("Unexpected end of input")?;
+            Ok(Formula::Atomic(operator, vec![left, right]))
         }
-    }
-
-    fn parse_predicate_call(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
-        let predicate = match tokenizer.next() {
-            Some(Token::PredicateIdentifier(identifier)) => identifier,
-            _ => panic!("Expected predicate identifier, got {:?}", tokenizer.peek()),
-        };
-        match tokenizer.peek() {
-            Some(Token::OpenParen) => {}
-            _ => return Expression::Predicate(predicate, Vec::new()), // Just a named predicate
-        }
-        tokenizer.next();
-        let mut arguments = Vec::new();
-        loop {
-            if tokenizer.peek() == Some(&Token::CloseParen) {
-                tokenizer.next();
-                break;
-            }
-            arguments.push(self.parse_predicate_argument(tokenizer));
-            match tokenizer.peek() {
-                Some(Token::Comma) => {
-                    tokenizer.next();
-                }
-                Some(Token::CloseParen) => {
-                    tokenizer.next();
-                    break;
-                }
-                _ => panic!("Expected ',' or ')', got {:?}", tokenizer.peek()),
-            }
-        }
-        Expression::Predicate(predicate, arguments)
-    }
-
-    fn parse_function_call(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
-        let function = match tokenizer.next() {
-            Some(Token::FunctionIdentifier(identifier)) => identifier,
-            _ => panic!("Expected function identifier, got {:?}", tokenizer.peek()),
-        };
-        assert_eq!(tokenizer.next(), Some(Token::OpenParen), "Expected '('");
-        let mut arguments = Vec::new();
-        loop {
-            let next_token = tokenizer.peek();
-            if next_token == Some(&Token::CloseParen) {
-                break;
-            }
-            arguments.push(self.parse_function_expression(tokenizer));
-            match tokenizer.peek() {
-                Some(Token::Comma) => {
-                    tokenizer.next();
-                }
-                Some(Token::CloseParen) => {
-                    tokenizer.next();
-                    break;
-                }
-                _ => panic!("Expected ',' or ')', got {:?}", tokenizer.peek()),
-            }
-        }
-        Expression::Function(function, arguments)
-    }
-
-    fn parse_function_expression(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
-        // This is either an object, a function call or an infix function call.
-        let first_component = self.parse_function_argument(tokenizer);
-        let next_token = tokenizer.peek();
-        // If it is a function identifier, it is an infix function call.
-        // Otherwise we don't care.
-        if let Some(Token::FunctionIdentifier(_)) = next_token {
-            let next_token = tokenizer.next();
-            let operator = match next_token {
-                Some(Token::FunctionIdentifier(identifier)) => identifier,
-                _ => panic!("Expected function identifier, got {:?}", next_token),
-            };
-            let second_component = self.parse_function_argument(tokenizer);
-            Expression::Function(operator, vec![first_component, second_component])
-        } else {
-            first_component
-        }
-    }
-
-    fn parse_function_argument(&self, tokenizer: &mut Peekable<Tokenizer>) -> Expression {
-        let next_token = tokenizer.peek();
-        match next_token {
-            Some(Token::FunctionIdentifier(_)) => self.parse_function_call(tokenizer),
-            Some(Token::ObjectIdentifier(identifier)) => {
-                let identifier = identifier.clone();
-                tokenizer.next();
-                Expression::Object(identifier)
-            }
-            Some(Token::OpenParen) => {
-                tokenizer.next();
-                let result = self.parse_function_expression(tokenizer);
-                assert_eq!(tokenizer.next(), Some(Token::CloseParen), "Expected ')'");
-                result
-            }
-            _ => panic!(
-                "Expected function or object identifier, got {:?}",
-                next_token
-            ),
-        }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_parse_simple() {
-        let parser = Parser::new();
-        let expression = parser.parse("(?P(x) && ?Q(x)) ⇒ ?R(x)".to_string());
-        assert_eq!(
-            expression,
-            Expression::BinaryOperator(
-                BinaryOperator::Implies,
-                Box::new(Expression::BinaryOperator(
-                    BinaryOperator::And,
-                    Box::new(Expression::Predicate(
-                        "P".to_string(),
-                        vec![Expression::Object("x".to_string())]
-                    )),
-                    Box::new(Expression::Predicate(
-                        "Q".to_string(),
-                        vec![Expression::Object("x".to_string())]
-                    ))
-                )),
-                Box::new(Expression::Predicate(
-                    "R".to_string(),
-                    vec![Expression::Object("x".to_string())]
-                ))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_quantifier_chain() {
-        let parser = Parser::new();
-        let expression = parser.parse("∀x∃z {?P(x, z)}".to_string());
-        assert_eq!(
-            expression,
-            Expression::QuantifierChain(
-                vec![
-                    (Quantifier::ForAll, "x".to_string()),
-                    (Quantifier::ThereExists, "z".to_string())
-                ],
-                Box::new(Expression::Predicate(
-                    "P".to_string(),
-                    vec![
-                        Expression::Object("x".to_string()),
-                        Expression::Object("z".to_string())
-                    ]
-                ))
-            )
-        );
-    }
-
-    #[test]
-    fn test_parse_operator_precedence() {
-        let parser = Parser::new();
-        let expression = parser.parse("?P(x) && ?Q(x) || ?R(x) ⇒ ?S(x) ⇔ ?T(x)".to_string());
-        assert_eq!(
-            expression,
-            Expression::BinaryOperator(
-                BinaryOperator::Or,
-                Box::new(Expression::BinaryOperator(
-                    BinaryOperator::And,
-                    Box::new(Expression::Predicate(
-                        "P".to_string(),
-                        vec![Expression::Object("x".to_string())]
-                    )),
-                    Box::new(Expression::Predicate(
-                        "Q".to_string(),
-                        vec![Expression::Object("x".to_string())]
-                    ))
-                )),
-                Box::new(Expression::BinaryOperator(
-                    BinaryOperator::EquivalentTo,
-                    Box::new(Expression::BinaryOperator(
-                        BinaryOperator::Implies,
-                        Box::new(Expression::Predicate(
-                            "R".to_string(),
-                            vec![Expression::Object("x".to_string())]
-                        )),
-                        Box::new(Expression::Predicate(
-                            "S".to_string(),
-                            vec![Expression::Object("x".to_string())]
-                        ))
-                    )),
-                    Box::new(Expression::Predicate(
-                        "T".to_string(),
-                        vec![Expression::Object("x".to_string())]
-                    )),
-                ))
-            )
-        );
-    }
-
-    #[test]
-    fn test_negated_predicates() {
-        let parser = Parser::new();
-        let expression = parser.parse("~?P && ~:Q(x) ?SUBSET z && x ∈ y".to_string());
-        assert_eq!(
-            expression,
-            Expression::BinaryOperator(
-                BinaryOperator::And,
-                Box::new(Expression::BinaryOperator(
-                    BinaryOperator::And,
-                    Box::new(Expression::Negation(Box::new(Expression::Predicate(
-                        "P".to_string(),
-                        Vec::new()
-                    )))),
-                    Box::new(Expression::Negation(Box::new(Expression::Predicate(
-                        "SUBSET".to_string(),
-                        vec![
-                            Expression::Function(
-                                "Q".to_string(),
-                                vec![Expression::Object("x".to_string())]
-                            ),
-                            Expression::Object("z".to_string())
-                        ]
-                    ))))
-                )),
-                Box::new(Expression::Predicate(
-                    "∈".to_string(),
-                    vec![
-                        Expression::Object("x".to_string()),
-                        Expression::Object("y".to_string())
-                    ]
-                ))
-            )
-        );
-    }
-
-    #[test]
-    fn test_function_compositions() {
-        let parser = Parser::new();
-        let expression = parser.parse("\\(x+y)=7 ⇒ :f(x, y+1) ∈ z".to_string());
-        assert_eq!(
-            expression,
-            Expression::BinaryOperator(
-                BinaryOperator::Implies,
-                Box::new(Expression::Predicate(
-                    "=".to_string(),
-                    vec![
-                        Expression::Function(
-                            "+".to_string(),
-                            vec![
-                                Expression::Object("x".to_string()),
-                                Expression::Object("y".to_string())
-                            ]
-                        ),
-                        Expression::Object("7".to_string())
-                    ]
-                )),
-                Box::new(Expression::Predicate(
-                    "∈".to_string(),
-                    vec![
-                        Expression::Function(
-                            "f".to_string(),
-                            vec![
-                                Expression::Object("x".to_string()),
-                                Expression::Function(
-                                    "+".to_string(),
-                                    vec![
-                                        Expression::Object("y".to_string()),
-                                        Expression::Object("1".to_string())
-                                    ]
-                                )
-                            ]
-                        ),
-                        Expression::Object("z".to_string())
-                    ]
-                ))
-            )
-        );
     }
 }
