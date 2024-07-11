@@ -1,6 +1,6 @@
 use std::{iter::Peekable, str::Chars};
 
-use crate::formula::{Formula, LogicalOperator};
+use crate::formula::{LogicalOperatorName, ParsedFormula};
 
 struct Tokenizer<Iter>
 where
@@ -64,7 +64,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn parse(expression: &'a str) -> Result<Formula, String> {
+    pub fn parse(expression: &'a str) -> Result<ParsedFormula, String> {
         let mut parser = Parser::new(expression);
         let result = parser.parse_formula();
         if parser.tokenizer.peek().is_some() {
@@ -77,11 +77,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_formula(&mut self) -> Result<Formula, String> {
+    fn parse_formula(&mut self) -> Result<ParsedFormula, String> {
         let next_token = self.tokenizer.next().ok_or("Unexpected end of input")?;
         if next_token == "¬" {
             let formula = self.parse_formula()?;
-            Ok(Formula::Compound(LogicalOperator::Not, vec![formula]))
+            Ok(ParsedFormula::Compound(
+                LogicalOperatorName::Not,
+                vec![formula],
+            ))
         } else if next_token == "(" {
             let left = self.parse_formula()?;
             let operator = self.tokenizer.next().ok_or("Unexpected end of input")?;
@@ -93,25 +96,25 @@ impl<'a> Parser<'a> {
                 ));
             }
             self.tokenizer.next();
-            if let Ok(logical_operator) = LogicalOperator::try_from(operator.as_str()) {
-                Ok(Formula::Compound(logical_operator, vec![left, right]))
+            if let Ok(logical_operator) = LogicalOperatorName::try_from(operator.as_str()) {
+                Ok(ParsedFormula::Compound(logical_operator, vec![left, right]))
             } else {
                 Err(format!("Invalid logical operator: {}", operator))
             }
         } else if next_token == "∀" {
             let variable = self.tokenizer.next().ok_or("Unexpected end of input")?;
             let formula = self.parse_formula()?;
-            Ok(Formula::Universal(variable, Box::new(formula)))
+            Ok(ParsedFormula::Universal(variable, Box::new(formula)))
         } else if next_token == "∃" {
             let variable = self.tokenizer.next().ok_or("Unexpected end of input")?;
             let formula = self.parse_formula()?;
-            Ok(Formula::Existential(variable, Box::new(formula)))
+            Ok(ParsedFormula::Existential(variable, Box::new(formula)))
         } else {
             // The only kind of atomic formula we handle is the binary atomic formula (eg "x∈y")
             let left = next_token;
             let operator = self.tokenizer.next().ok_or("Unexpected end of input")?;
             let right = self.tokenizer.next().ok_or("Unexpected end of input")?;
-            Ok(Formula::Atomic(operator, vec![left, right]))
+            Ok(ParsedFormula::Atomic(operator, vec![left, right]))
         }
     }
 }
