@@ -93,6 +93,55 @@ impl<T: LogicalOperator> LogicalOperator for ReorderedOperator<T> {
     }
 }
 
+#[derive(Debug)]
+pub struct MergedOperator {
+    operators: Vec<(usize, Option<Rc<dyn LogicalOperator>>, Option<Vec<Formula>>)>,
+    merge_operator: Rc<dyn LogicalOperator>,
+}
+
+impl MergedOperator {
+    pub fn new(formulas: Vec<Formula>, merge_operator: Rc<dyn LogicalOperator>) -> Self {
+        Self {
+            operators: formulas
+                .into_iter()
+                .map(|formula| match formula {
+                    Formula::Compound(operator, operands) => {
+                        (operands.len(), Some(operator), Some(operands))
+                    }
+                    formula => (1, None, Some(vec![formula])),
+                })
+                .collect(),
+            merge_operator,
+        }
+    }
+
+    pub fn take_operands(&mut self) -> Vec<Formula> {
+        self.operators
+            .iter_mut()
+            .filter_map(|(_, _, formula)| formula.take())
+            .flatten()
+            .collect()
+    }
+}
+
+impl LogicalOperator for MergedOperator {
+    fn evaluate(&self, operands: &[bool]) -> bool {
+        let mut results = Vec::with_capacity(self.operators.len());
+        let mut index = 0;
+        for (arity, operator, _) in &self.operators {
+            if let Some(operator) = operator {
+                let result = operator.evaluate(&operands[index..index + *arity]);
+                results.push(result);
+            } else {
+                assert_eq!(*arity, 1);
+                results.push(operands[index]);
+            }
+            index += *arity;
+        }
+        self.merge_operator.evaluate(&results)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Formula {
     Atomic(usize, Vec<usize>),
@@ -154,6 +203,7 @@ impl Formula {
         }
     }
 
+    #[must_use]
     pub fn rename_free(&self, a: usize, b: usize) -> Self {
         use Formula::*;
         match self {
@@ -179,11 +229,37 @@ impl Formula {
         }
     }
 
+    #[must_use]
     pub fn rename_free_without_collisions(&self, a: usize, b: usize) -> Self {
         if a != b {
             self.rename_free(b, allocate_variable()).rename_free(a, b)
         } else {
             self.clone()
+        }
+    }
+
+    #[must_use]
+    pub fn compacted(&self) -> Self {
+        use Formula::*;
+        match self {
+            Atomic(_, _) => self.clone(),
+            Compound(operator, operands) => {
+                let operands = operands
+                    .iter()
+                    .map(|operand| operand.compacted())
+                    .collect::<Vec<_>>();
+                if operands
+                    .iter()
+                    .any(|operand| matches!(operand, Compound(_, _)))
+                {
+                    let mut merged_operator = MergedOperator::new(operands, Rc::clone(operator));
+                    let operands = merged_operator.take_operands();
+                    Compound(Rc::new(merged_operator), operands)
+                } else {
+                    Compound(Rc::clone(operator), operands)
+                }
+            }
+            Universal(variable, inner) => Universal(*variable, Box::new(inner.compacted())),
         }
     }
 }
@@ -268,7 +344,6 @@ impl ParsedFormulaInterpreter {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use Formula::*;
 
@@ -336,5 +411,34 @@ mod tests {
             )),
         );
         assert!(!formula1.equivalent_to(&formula2));
+
+        let formula1 = Universal(variable1, Box::new(Atomic(0, vec![variable1, variable2])));
+        let formula2 = Universal(variable2, Box::new(Atomic(0, vec![variable2, variable2])));
+        assert!(!formula1.equivalent_to(&formula2));
+    }
+
+    #[test]
+    fn merged_positive() {
+        let variable1 = allocate_variable();
+        let variable2 = allocate_variable();
+
+        let formula1 = Compound(
+            Rc::new(NamedLogicalOperator::Or),
+            vec![
+                Compound(
+                    Rc::new(NamedLogicalOperator::Not),
+                    vec![Atomic(0, vec![variable1, variable2])],
+                ),
+                Atomic(0, vec![variable2, variable1]),
+            ],
+        ).compacted();
+        let formula2 = Compound(
+            Rc::new(NamedLogicalOperator::Implies),
+            vec![
+                Atomic(0, vec![variable1, variable2]),
+                Atomic(0, vec![variable2, variable1]),
+            ],
+        ).compacted();
+        assert!(formula1.equivalent_to(&formula2));
     }
 }

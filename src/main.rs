@@ -41,8 +41,8 @@ fn main() {
         };
         println!("{:?}", second);
         let mut interpreter = ParsedFormulaInterpreter::default();
-        let first = interpreter.interpret(first);
-        let second = interpreter.interpret(second);
+        let first = interpreter.interpret(first).compacted();
+        let second = interpreter.interpret(second).compacted();
         println!("Φ: {:?}", first);
         println!("Ψ: {:?}", second);
         println!("Equivalent: {}", first.equivalent_to(&second));
