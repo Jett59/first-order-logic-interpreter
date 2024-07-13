@@ -1,6 +1,6 @@
 use std::{iter::Peekable, str::Chars};
 
-use crate::formula::{LogicalOperatorName, ParsedFormula};
+use crate::formula::{NamedLogicalOperator, ParsedFormula};
 
 struct Tokenizer<Iter>
 where
@@ -82,7 +82,7 @@ impl<'a> Parser<'a> {
         if next_token == "¬" {
             let formula = self.parse_formula()?;
             Ok(ParsedFormula::Compound(
-                LogicalOperatorName::Not,
+                NamedLogicalOperator::Not,
                 vec![formula],
             ))
         } else if next_token == "(" {
@@ -96,7 +96,7 @@ impl<'a> Parser<'a> {
                 ));
             }
             self.tokenizer.next();
-            if let Ok(logical_operator) = LogicalOperatorName::try_from(operator.as_str()) {
+            if let Ok(logical_operator) = NamedLogicalOperator::try_from(operator.as_str()) {
                 Ok(ParsedFormula::Compound(logical_operator, vec![left, right]))
             } else {
                 Err(format!("Invalid logical operator: {}", operator))

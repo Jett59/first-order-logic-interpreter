@@ -1,12 +1,12 @@
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
+    collections::HashMap,
+    fmt::Debug,
+    rc::Rc,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
-use bit_set::BitSet;
-
 #[derive(Debug, Clone)]
-pub enum LogicalOperatorName {
+pub enum NamedLogicalOperator {
     Not,
     And,
     Or,
@@ -14,16 +14,16 @@ pub enum LogicalOperatorName {
     Biconditional,
 }
 
-impl TryFrom<&str> for LogicalOperatorName {
+impl TryFrom<&str> for NamedLogicalOperator {
     type Error = String;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "¬" => Ok(LogicalOperatorName::Not),
-            "∧" => Ok(LogicalOperatorName::And),
-            "∨" => Ok(LogicalOperatorName::Or),
-            "→" => Ok(LogicalOperatorName::Implies),
-            "↔" => Ok(LogicalOperatorName::Biconditional),
+            "¬" => Ok(NamedLogicalOperator::Not),
+            "∧" => Ok(NamedLogicalOperator::And),
+            "∨" => Ok(NamedLogicalOperator::Or),
+            "→" => Ok(NamedLogicalOperator::Implies),
+            "↔" => Ok(NamedLogicalOperator::Biconditional),
             _ => Err(format!("Invalid logical operator: {}", value)),
         }
     }
@@ -32,131 +32,309 @@ impl TryFrom<&str> for LogicalOperatorName {
 #[derive(Debug, Clone)]
 pub enum ParsedFormula {
     Atomic(String, Vec<String>),
-    Compound(LogicalOperatorName, Vec<ParsedFormula>),
+    Compound(NamedLogicalOperator, Vec<ParsedFormula>),
     Universal(String, Box<ParsedFormula>),
     Existential(String, Box<ParsedFormula>),
 }
 
-#[derive(Debug, Clone, Hash, PartialEq)]
+pub trait LogicalOperator: Debug {
+    fn evaluate(&self, operands: &[bool]) -> bool;
+}
+
+impl<T: LogicalOperator> LogicalOperator for &T
+where
+    T: ?Sized,
+{
+    fn evaluate(&self, operands: &[bool]) -> bool {
+        (*self).evaluate(operands)
+    }
+}
+
+impl LogicalOperator for NamedLogicalOperator {
+    fn evaluate(&self, operands: &[bool]) -> bool {
+        if operands.len() == 1 {
+            match self {
+                NamedLogicalOperator::Not => !operands[0],
+                _ => panic!("Expected 2 operands, found 1 for {:?}", self),
+            }
+        } else if operands.len() == 2 {
+            match self {
+                NamedLogicalOperator::And => operands[0] && operands[1],
+                NamedLogicalOperator::Or => operands[0] || operands[1],
+                NamedLogicalOperator::Implies => !operands[0] || operands[1],
+                NamedLogicalOperator::Biconditional => operands[0] == operands[1],
+                _ => panic!("Expected 1 operand, found 2 for {:?}", self),
+            }
+        } else {
+            panic!("Expected 1 or 2 operands, found {}", operands.len());
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ReorderedOperator<T: LogicalOperator> {
+    operator: T,
+    operands: Vec<usize>,
+}
+
+impl<T: LogicalOperator> ReorderedOperator<T> {
+    pub fn new(operator: T, operands: Vec<usize>) -> Self {
+        ReorderedOperator { operator, operands }
+    }
+}
+
+impl<T: LogicalOperator> LogicalOperator for ReorderedOperator<T> {
+    fn evaluate(&self, operands: &[bool]) -> bool {
+        let mut reordered_operands = Vec::with_capacity(self.operands.len());
+        for &index in &self.operands {
+            reordered_operands.push(operands[index]);
+        }
+        self.operator.evaluate(&reordered_operands)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum Formula {
-    Atomic(usize, Box<[usize]>),
-    TruthTable(TruthTable),
+    Atomic(usize, Vec<usize>),
+    Compound(Rc<dyn LogicalOperator>, Vec<Formula>),
     Universal(usize, Box<Formula>),
 }
 
-/// A truth table for a set of formulae
-///
-/// The truth table is represented as a bit set, where each bit represents the truth value of the formulae for a given input
-/// The input can be found by converting the index to binary, and using the bits as the truth values for the formulae
-/// The formulae are sorted by their hash, and the results are stored in the same order
-#[derive(Debug, Clone, Hash, PartialEq)]
-pub struct TruthTable {
-    formulae: Vec<Formula>,
-    results: BitSet,
+fn allocate_variable() -> usize {
+    static NEXT_VARIABLE: AtomicUsize = AtomicUsize::new(0);
+    NEXT_VARIABLE.fetch_add(1, Ordering::Relaxed)
 }
 
-pub type LogicalOperator = dyn Fn(&[bool]) -> bool;
+impl Formula {
+    pub fn equivalent_to(&self, other: &Self) -> bool {
+        use Formula::*;
+        match (self, other) {
+            (Atomic(my_predicate, my_operands), Atomic(other_predicate, other_operands)) => {
+                my_predicate == other_predicate && my_operands == other_operands
+            }
+            (Compound(my_operator, my_operands), Compound(other_operator, other_operands)) => {
+                if my_operands.len() != other_operands.len() {
+                    return false;
+                }
+                // Reorderings of the operands are fine so long as the logical operators are equivalent after reordering
+                let mut reordering = Vec::with_capacity(my_operands.len());
+                for my_operand in my_operands {
+                    let mut found = false;
+                    for (i, other_operand) in other_operands.iter().enumerate() {
+                        if !reordering.contains(&i) && my_operand.equivalent_to(other_operand) {
+                            reordering.push(i);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return false;
+                    }
+                }
+                // Check if the logical operators are equivalent after reordering
+                let reordered_operator = ReorderedOperator::new(my_operator.as_ref(), reordering);
+                // The only way to check if two logical operators are equivalent is to evaluate them on all possible inputs
+                for i in 0..1 << my_operands.len() {
+                    let operands = (0..my_operands.len())
+                        .map(|j| i & (1 << j) != 0)
+                        .collect::<Vec<_>>();
+                    if reordered_operator.evaluate(&operands) != other_operator.evaluate(&operands)
+                    {
+                        return false;
+                    }
+                }
+                true
+            }
+            (Universal(my_variable, my_formula), Universal(other_variable, other_formula)) => {
+                my_formula
+                    .rename_free_without_collisions(*my_variable, *other_variable)
+                    .equivalent_to(other_formula)
+            }
+            _ => false,
+        }
+    }
 
-impl TruthTable {
-    pub fn new(mut formulae: Vec<Formula>, relationship: &LogicalOperator) -> Self {
-        // To allow equality comparisons to work, we need to sort the formulae by their hash
-        // However, we also need to supply the original order of the formulae to the relationship, so we keep track of the original indices as well
-        let mut indices: Vec<usize> = (0..formulae.len()).collect();
-        indices.sort_by_key(|&i| calculate_hash(&formulae[i]));
-        formulae.sort_by_key(|formula| calculate_hash(formula));
+    pub fn rename_free(&self, a: usize, b: usize) -> Self {
+        use Formula::*;
+        match self {
+            Atomic(predicate, operands) => {
+                let new_operands = operands
+                    .iter()
+                    .map(|operand| if *operand == a { b } else { *operand })
+                    .collect::<Vec<_>>();
+                Atomic(*predicate, new_operands)
+            }
+            Compound(operator, operands) => Compound(
+                Rc::clone(operator),
+                operands
+                    .iter()
+                    .map(|operand| operand.rename_free(a, b))
+                    .collect(),
+            ),
+            Universal(variable, formula) if a != *variable => {
+                let new_formula = formula.rename_free(a, b);
+                Universal(*variable, Box::new(new_formula))
+            }
+            Universal(_, _) => self.clone(),
+        }
+    }
 
-        // Calculate the results for the truth table
-        let mut results = BitSet::new();
-        for i in 0..(1 << formulae.len()) {
-            let values = indices
-                .iter()
-                .map(|j| (i >> j) & 1 == 1)
-                .collect::<Vec<_>>();
-            let result = relationship(&values);
-            if result {
-                results.insert(i);
+    pub fn rename_free_without_collisions(&self, a: usize, b: usize) -> Self {
+        if a != b {
+            self.rename_free(b, allocate_variable()).rename_free(a, b)
+        } else {
+            self.clone()
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct ParsedFormulaInterpreter {
+    atomic_operators: HashMap<String, usize>,
+    free_variables: HashMap<String, usize>,
+}
+
+fn allocate_atomic_operator_id() -> usize {
+    static NEXT_ATOMIC_OPERATOR_ID: AtomicUsize = AtomicUsize::new(0);
+    NEXT_ATOMIC_OPERATOR_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+impl ParsedFormulaInterpreter {
+    pub fn interpret(&mut self, parsed_formula: ParsedFormula) -> Formula {
+        match parsed_formula {
+            ParsedFormula::Atomic(operator, operands) => {
+                if let Some(&id) = self.atomic_operators.get(&operator) {
+                    Formula::Atomic(
+                        id,
+                        operands
+                            .into_iter()
+                            .map(|operand| {
+                                *self
+                                    .free_variables
+                                    .entry(operand)
+                                    .or_insert_with(allocate_variable)
+                            })
+                            .collect(),
+                    )
+                } else {
+                    let id = allocate_atomic_operator_id();
+                    self.atomic_operators.insert(operator, id);
+                    Formula::Atomic(
+                        id,
+                        operands
+                            .into_iter()
+                            .map(|operand| {
+                                *self
+                                    .free_variables
+                                    .entry(operand)
+                                    .or_insert_with(allocate_variable)
+                            })
+                            .collect(),
+                    )
+                }
+            }
+            ParsedFormula::Compound(operator, operands) => Formula::Compound(
+                Rc::new(operator),
+                operands
+                    .into_iter()
+                    .map(|operand| self.interpret(operand))
+                    .collect(),
+            ),
+            ParsedFormula::Universal(variable, inner) => {
+                // Even though this is a new variable, it is still safe to use the same id as the old variable
+                // If there would be collisions, it would also have been a collision in the original formula
+                let variable_id = *self
+                    .free_variables
+                    .entry(variable)
+                    .or_insert_with(allocate_variable);
+                Formula::Universal(variable_id, Box::new(self.interpret(*inner)))
+            }
+            ParsedFormula::Existential(variable, inner) => {
+                // To avoid duplication, just translate this to a universal formula
+                self.interpret(ParsedFormula::Compound(
+                    NamedLogicalOperator::Not,
+                    vec![ParsedFormula::Universal(
+                        variable,
+                        Box::new(ParsedFormula::Compound(
+                            NamedLogicalOperator::Not,
+                            vec![*inner],
+                        )),
+                    )],
+                ))
             }
         }
-        Self { formulae, results }
     }
-
-    pub fn as_logical_operator(&self) -> impl Fn(&[bool]) -> bool + '_ {
-        move |values| {
-            // Convert the boolean values to an index in the truth table
-            let index = values
-                .iter()
-                .enumerate()
-                .fold(0, |acc, (i, &value)| acc | ((value as usize) << i));
-            self.results.contains(index)
-        }
-    }
-}
-
-fn calculate_hash<T: Hash>(value: &T) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    use Formula::*;
 
     #[test]
-    fn test_truth_table_commutative() {
-        let formulae = vec![
-            Formula::Atomic(0, Box::new([1])),
-            Formula::Atomic(1, Box::new([0])),
-        ];
-        let relationship = |values: &[bool]| values[0] && values[1];
-        let truth_table = TruthTable::new(formulae, &relationship);
-        let logical_operator = truth_table.as_logical_operator();
-        assert_eq!(logical_operator(&[false, false]), false);
-        assert_eq!(logical_operator(&[false, true]), false);
-        assert_eq!(logical_operator(&[true, false]), false);
-        assert_eq!(logical_operator(&[true, true]), true);
-    }
-
-    #[test]
-    fn test_truth_table_complex() {
-        // Since the order may be changed, we should compare equivalent truth tables instead of checking for an exact match
-        let formulae = vec![
-            Formula::Atomic(0, Box::new([1])),
-            Formula::Atomic(1, Box::new([0])),
-        ];
-        let relationship1 = |values: &[bool]| !values[0] || values[1];
-        let truth_table1 = TruthTable::new(formulae.clone(), &relationship1);
-        let relationship2 = |values: &[bool]| !(values[0] && !values[1]);
-        let truth_table2 = TruthTable::new(formulae.clone(), &relationship2);
-        assert_eq!(truth_table1, truth_table2);
-        let relationship3 = |values: &[bool]| values[0] && !values[1];
-        let truth_table3 = TruthTable::new(formulae, &relationship3);
-        assert_ne!(truth_table1, truth_table3);
-
-        // The first two could be either of these:
-        let results_candidate1 =  BitSet::from_bytes(&[0b10110000]);
-        let results_candidate2 = BitSet::from_bytes(&[0b11010000]);
-        
-        assert!(
-            results_candidate1 == truth_table1.results
-                || results_candidate2 == truth_table1.results
+    fn simple_equivalent_formulas() {
+        let formula1 = Compound(
+            Rc::new(NamedLogicalOperator::And),
+            vec![Atomic(0, vec![0, 1]), Atomic(1, vec![1, 0])],
         );
+        let formula2 = Compound(
+            Rc::new(NamedLogicalOperator::And),
+            vec![Atomic(1, vec![1, 0]), Atomic(0, vec![0, 1])],
+        );
+        assert!(formula1.equivalent_to(&formula2));
+
+        let variable1 = allocate_variable();
+        let variable2 = allocate_variable();
+        let variable3 = allocate_variable();
+
+        let formula1 = Universal(variable1, Box::new(Atomic(0, vec![variable1, variable3])));
+        let formula2 = Universal(variable2, Box::new(Atomic(0, vec![variable2, variable3])));
+        assert!(formula1.equivalent_to(&formula2));
+
+        let formula1 = Universal(variable1, Box::new(Atomic(0, vec![variable1, variable2])));
+        let formula2 = Universal(variable1, Box::new(Atomic(0, vec![variable1, variable2])));
+        assert!(formula1.equivalent_to(&formula2));
     }
 
     #[test]
-    fn test_truth_table_out_of_order() {
-        let formulas1 = vec![
-            Formula::Atomic(0, Box::new([1])),
-            Formula::Atomic(1, Box::new([0])),
-        ];
-        let formulas2 = vec![
-            Formula::Atomic(1, Box::new([0])),
-            Formula::Atomic(0, Box::new([1])),
-        ];
-        let relationship1 = |values: &[bool]| !values[0] || values[1];
-        let relationship2 = |values: &[bool]| !values[1] || values[0];
-        let truth_table1 = TruthTable::new(formulas1, &relationship1);
-        let truth_table2 = TruthTable::new(formulas2, &relationship2);
-        assert_eq!(truth_table1, truth_table2);
+    fn simple_different_formulas() {
+        let formula1 = Atomic(0, vec![0, 1]);
+        let formula2 = Atomic(0, vec![1, 0]);
+        assert!(!formula1.equivalent_to(&formula2));
+
+        let variable1 = allocate_variable();
+        let variable2 = allocate_variable();
+        let variable3 = allocate_variable();
+
+        let formula1 = Universal(variable1, Box::new(Atomic(0, vec![variable1, variable3])));
+        let formula2 = Universal(variable3, Box::new(Atomic(0, vec![variable2, variable3])));
+        assert!(!formula1.equivalent_to(&formula2));
+
+        let formula1 = Compound(
+            Rc::new(NamedLogicalOperator::Implies),
+            vec![Atomic(0, vec![0, 1]), Atomic(1, vec![1, 0])],
+        );
+        let formula2 = Compound(
+            Rc::new(NamedLogicalOperator::Implies),
+            vec![Atomic(1, vec![1, 0]), Atomic(0, vec![0, 1])],
+        );
+        assert!(!formula1.equivalent_to(&formula2));
+
+        let formula1 = Universal(
+            variable1,
+            Box::new(Universal(
+                variable1,
+                Box::new(Atomic(0, vec![variable1, variable3])),
+            )),
+        );
+        let formula2 = Universal(
+            variable2,
+            Box::new(Universal(
+                variable3,
+                Box::new(Atomic(0, vec![variable2, variable3])),
+            )),
+        );
+        assert!(!formula1.equivalent_to(&formula2));
     }
 }
