@@ -431,14 +431,43 @@ mod tests {
                 ),
                 Atomic(0, vec![variable2, variable1]),
             ],
-        ).compacted();
+        )
+        .compacted();
         let formula2 = Compound(
             Rc::new(NamedLogicalOperator::Implies),
             vec![
                 Atomic(0, vec![variable1, variable2]),
                 Atomic(0, vec![variable2, variable1]),
             ],
-        ).compacted();
+        )
+        .compacted();
+        assert!(formula1.equivalent_to(&formula2));
+
+        let formula1 = Compound(
+            Rc::new(NamedLogicalOperator::And),
+            vec![
+                Compound(
+                    Rc::new(NamedLogicalOperator::Not),
+                    vec![Atomic(0, vec![variable1, variable2])],
+                ),
+                Compound(
+                    Rc::new(NamedLogicalOperator::Not),
+                    vec![Atomic(0, vec![variable2, variable1])],
+                ),
+            ],
+        )
+        .compacted();
+        let formula2 = Compound(
+            Rc::new(NamedLogicalOperator::Not),
+            vec![Compound(
+                Rc::new(NamedLogicalOperator::Or),
+                vec![
+                    Atomic(0, vec![variable1, variable2]),
+                    Atomic(0, vec![variable2, variable1]),
+                ],
+            )],
+        )
+        .compacted();
         assert!(formula1.equivalent_to(&formula2));
     }
 }
